@@ -165,3 +165,4 @@ async def stop_reminder_system():
     """Остановка системы напоминаний."""
     reminder_scheduler.stop()
     print("Система напоминаний остановлена")
+    

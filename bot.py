@@ -445,3 +445,13 @@ async def callback_stats_period(callback: types.CallbackQuery):
         ])
     )
     await callback.answer()
+
+# ... (твой код, функции callback_stats_period и т.д.) ...
+
+async def main() -> None:
+    """Запуск бота"""
+    print("Бот запускается...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
