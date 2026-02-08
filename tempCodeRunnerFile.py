@@ -1,0 +1,359 @@
+import os
+import logging
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from dotenv import load_dotenv
+    
+# Импорт функций из модулей
+from daily_check.check import quick_pause, daily_check
+from sos.sos import handle_sos
+from registration import (
+    RegistrationState,
+    is_user_registered,
+    start_registration,
+    process_time_spent,
+    process_purpose,
+    process_likes,
+    process_reduce_time,
+    process_confirmation
+)
+from daily_check.check import save_pause_data, save_daily_data
+from daily_practice import get_next_practice, complete_practice, get_user_practice_status
+from daily_practice import get_daily_practice
+from tree_progress.tree import TreeProgress
+from daily_practice.schedule import get_user_stats, update_user_stats
+from datetime import datetime
+from daily_check.check import save_daily_data
+from scheduler import start_reminder_system, stop_reminder_system
+from scheduler import MOSCOW_TZ, get_moscow_time
+from stats.user_stats import update_stats, get_stats
+
+# ИМПОРТЫ FSM - ДОБАВИТЬ СЮДА:
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# Состояния для диалога
+class QuickPauseStates(StatesGroup):
+    waiting_purpose = State()      # Ожидаем ответ "зачем открываешь TikTok"
+    waiting_time = State()         # Ожидаем ответ "сколько времени"
+    confirmation = State()         # Ожидаем подтверждение
+
+class DailyCheckStates(StatesGroup):
+    waiting_reflection = State()   # Ожидаем ответ "как прошёл день"
+    waiting_practice = State()     # Ожидаем выполнение практики
+    
+class DailyPracticeStates(StatesGroup):
+    waiting_reflection = State()
+    waiting_practice_completion = State()
+    
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Токен бота
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+
+# Создание экземпляров бота и диспетчера с FSM
+storage = MemoryStorage()
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=storage)
+
+
+def get_main_keyboard() -> InlineKeyboardMarkup:
+    """Создание главного меню с кнопками"""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="⏸️ Быстрая пауза", callback_data="quick_pause"),
+            InlineKeyboardButton(text="📚 Дневная практика", callback_data="daily_practice")
+        ],
+        [
+            InlineKeyboardButton(text="🌳 Дерево прогресса", callback_data="tree_progress"),
+            InlineKeyboardButton(text="📊 Статистика", callback_data="stats")
+        ],
+        [
+            InlineKeyboardButton(text="🆘 SOS", callback_data="sos")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+# Создание экземпляров бота и диспетчера
+from aiogram.fsm.storage.memory import MemoryStorage
+storage = MemoryStorage()
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=storage)
+
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext) -> None:
+    """Обработка команды /start"""
+    user_id = message.from_user.id
+    
+    # Проверяем, зарегистрирован ли пользователь
+    if await is_user_registered(user_id):
+        user = message.from_user
+        await message.answer(
+            f"С возвращением, {user.first_name}! 👋\n\n"
+            "Выберите действие из меню ниже:",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        # Начинаем регистрацию
+        await start_registration(message, state)
+        
+# Обработчики состояний регистрации
+@dp.message(RegistrationState.time_spent)
+async def registration_time_spent(message: types.Message, state: FSMContext):
+    await process_time_spent(message, state)
+
+@dp.message(RegistrationState.purpose)
+async def registration_purpose(message: types.Message, state: FSMContext):
+    await process_purpose(message, state)
+
+@dp.message(RegistrationState.likes)
+async def registration_likes(message: types.Message, state: FSMContext):
+    await process_likes(message, state)
+
+@dp.message(RegistrationState.reduce_time)
+async def registration_reduce_time(message: types.Message, state: FSMContext):
+    await process_reduce_time(message, state)
+
+@dp.message(RegistrationState.confirm)
+async def registration_confirm(message: types.Message, state: FSMContext):
+    await process_confirmation(message, state)
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message) -> None:
+    """Обработка команды /help"""
+    help_text = (
+        "📚 <b>Справка по боту</b>\n\n"
+        "Доступные команды:\n"
+        "• /start - Главное меню\n"
+        "• /help - Эта справка\n"
+        "• /cancel - Отмена текущего действия\n\n"
+        "Функции кнопок:\n"
+        "• ⏸️ <b>Быстрая пауза</b> - Чек-ин перед TikTok\n"
+        "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
+        "• 🆘 <b>SOS</b> - Экстренная помощь\n\n"
+        "📚 <b>Дневная практика включает:</b>\n"
+        "• Рефлексию дня\n"
+        "• Осознанную практику (из 52 вариантов)\n"
+        "• Обновляется каждый день в 7:00 МСК\n"
+        "• Награда XP за выполнение"
+    )
+    await message.answer(help_text, parse_mode='HTML')
+
+
+@dp.callback_query(F.data == "quick_pause")
+async def callback_quick_pause(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text("⏸️ Зачем ты открываешь TikTok?")
+    await state.set_state(QuickPauseStates.waiting_purpose)
+    
+    # Обновляем статистику - ВАЖНО!
+    try:
+        from stats.user_stats import update_stats
+        await update_stats(callback.from_user.id, "quick_pause")
+        print(f"Статистика quick_pause обновлена для user_id {callback.from_user.id}")
+    except Exception as e:
+        print(f"Ошибка обновления статистики quick_pause: {e}")
+        logger.error(f"Ошибка обновления статистики quick_pause: {e}")
+    
+# Обработчики для QuickPause
+@dp.message(QuickPauseStates.waiting_purpose)
+async def handle_purpose(message: types.Message, state: FSMContext):
+    purpose = message.text.strip()
+    await state.update_data(purpose=purpose)
+    
+    await message.answer(
+        f"✅ Цель: {purpose}\n\n"
+        "Сколько минут планируешь провести в TikTok?"
+    )
+    await state.set_state(QuickPauseStates.waiting_time)
+
+@dp.message(QuickPauseStates.waiting_time)
+async def handle_time(message: types.Message, state: FSMContext):
+    time_str = message.text.strip()
+    await state.update_data(time_str=time_str)
+    
+    data = await state.get_data()
+    
+    await message.answer(
+        f"📋 Подтверждение:\n"
+        f"🎯 Цель: {data['purpose']}\n"
+        f"⏰ Время: {time_str}\n\n"
+        "Напиши 'да' для подтверждения или 'нет' для отмены"
+    )
+    await state.set_state(QuickPauseStates.confirmation)
+
+@dp.message(QuickPauseStates.confirmation)
+async def handle_confirmation(message: types.Message, state: FSMContext):
+    confirmation = message.text.strip().lower()
+    
+    if confirmation in ['да', 'yes', 'подтверждаю']:
+        data = await state.get_data()
+        
+        # Здесь вызывай функцию сохранения
+        # await save_pause_data(message.from_user.id, data)
+        
+        await message.answer(
+            "✅ Быстрая пауза установлена!",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+    else:
+        await message.answer("❌ Пауза отменена.")
+        await state.clear()
+
+
+
+async def handle_practice_reflection(message: types.Message, state: FSMContext):
+    """Обработка рефлексии дня"""
+    reflection = message.text.strip()
+    await state.update_data(reflection=reflection)
+    
+    # НЕ получаем новую практику - она уже показана в callback_daily_practice
+    # Просто подтверждаем запись рефлексии и ждём 'готово'
+    
+    await message.answer(
+        f"✅ Рефлексия записана: {reflection}\n\n"
+        f"🌱 Теперь выполните практику, которая показана выше.\n\n"
+        f"Когда закончите, напишите 'готово'",
+        parse_mode='HTML'
+    )
+    await state.set_state(DailyPracticeStates.waiting_practice_completion)
+
+async def handle_practice_completion(message: types.Message, state: FSMContext):
+    """Обработка завершения практики"""
+    if message.text.strip().lower() in ['готово', 'выполнил', 'done', 'завершил']:
+        user_id = message.from_user.id
+        data = await state.get_data()
+        reflection = data.get('reflection', '')
+        
+        # Сохраняем данные практики
+        practice_data = {
+            "reflection": reflection,
+            "completed_at": datetime.now().isoformat(),
+            "practice_completed": True
+        }
+        
+        # Сохраняем в daily_check
+        await save_daily_data(user_id, practice_data)
+        
+        # Показываем дерево прогресса (если есть)
+        try:
+            from tree_progress.tree import TreeProgress
+            tree = TreeProgress(user_id)
+            if tree.load():
+                progress_text = tree.get_progress_text()
+                await message.answer(
+                    f"🌳 <b>Твой прогресс:</b>\n\n{progress_text}",
+                    parse_mode='HTML'
+                )
+        except Exception as e:
+            logger.error(f"Ошибка загрузки прогресса: {e}")
+        
+        # Сообщение об успешном завершении
+        await message.answer(
+            f"🎉 <b>Практика засчитана!</b>\n\n"
+            f"📝 Рефлексия: {reflection}\n\n"
+            f"✅ Ты успешно выполнил(а) дневную практику!\n"
+            f"⭐ Получено XP за осознанность\n"
+            f"🌱 Продолжай в том же духе!\n\n"
+            f"Новая практика будет доступна завтра в 7:00 МСК",
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
+    else:
+        await message.answer(
+            "Напишите 'готово' когда выполните практику.\n"
+            "Или '/cancel' для отмены."
+        )
+
+        
+@dp.callback_query(F.data == "back_to_menu")
+async def callback_back_to_menu(callback: types.CallbackQuery):
+    """Возврат в главное меню"""
+    await callback.message.answer(
+        "🏠 <b>Главное меню</b>\n\nВыберите действие:",
+        parse_mode='HTML',
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()        
+
+@dp.callback_query(F.data.startswith("stats_"))
+async def callback_stats_period(callback: types.CallbackQuery):
+    """Обработка выбора периода статистики"""
+    period = callback.data.replace("stats_", "")
+    user_id = callback.from_user.id
+    
+    # Пока заглушка - показываем базовую статистику
+    await callback.message.answer(
+        f"📊 <b>Статистика за {period}</b>\n\n"
+        f"🎯 Всего практик: 0\n"
+        f"⭐ Получено XP: 0\n\n"
+        f"Начните выполнять практики для отслеживания прогресса!",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад к статистике", callback_data="stats")]
+        ])
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "tree_progress")
+@dp.callback_query(F.data == "tree_progress")
+async def callback_tree_progress(callback: types.CallbackQuery):
+    """Обработка кнопки 'Дерево прогресса'"""
+    user_id = callback.from_user.id
+    
+    try:
+        tree = TreeProgress(user_id)
+        if tree.load():
+            progress_text = tree.get_progress_text()
+            await callback.message.edit_text(
+                progress_text,
+                parse_mode='HTML',
+                reply_markup=get_main_keyboard()
+            )
+        else:
+            await callback.message.edit_text(
+                "🌱 Твой прогресс загружается...\n\n"
+                "Начни выполнять практики, чтобы увидеть рост своего дерева!",
+                reply_markup=get_main_keyboard()
+            )
+    except Exception as e:
+        logger.error(f"Ошибка загрузки прогресса: {e}")
+        await callback.message.edit_text(
+            "🌱 Продолжай практиковаться!\n\n"
+            "Дерево покажет твой прогресс после первых практик.",
+            reply_markup=get_main_keyboard()
+        )
+    
+    await callback.answer()
+
+    
+async def handle_practice(message: types.Message, state: FSMContext):
+    if message.text.strip().lower() in ['готово', 'выполнил', 'done']:
+        data = await state.get_data()
+        
+        # Сохранение данных практики
+        await save_daily_data(message.from_user.id, data)
+        
+        # ОБНОВЛЕНИЕ СТАТИСТИКИ И ДЕРЕВА ПРОГРЕССА
+        user_id = message.from_user.id
+        practice_data = {
+            'completed_at': datetime.now(MOSCOW_TZ).isoformat(),
+            'type': 'daily_practice',
+            'xp': 5  # Добавляем XP за практику
+        }
+        
+        try:
