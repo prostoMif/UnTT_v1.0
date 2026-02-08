@@ -4,8 +4,9 @@ from datetime import datetime, time
 from typing import List, Dict
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.redis import RedisJobStore
+# from apscheduler.jobstores.redis import RedisJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.jobstores.memory import MemoryJobStore
 import pytz
 
 from daily_check.check import save_daily_data
@@ -23,7 +24,7 @@ class ReminderScheduler:
         self.scheduler = AsyncIOScheduler(
             timezone=MOSCOW_TZ,
             jobstores={
-                'default': RedisJobStore()
+                'default': MemoryJobStore()
             },
             executors={
                 'default': AsyncIOExecutor()
