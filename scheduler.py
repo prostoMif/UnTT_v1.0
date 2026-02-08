@@ -20,20 +20,6 @@ MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 class ReminderScheduler:
     """Класс для управления системой напоминаний."""
     
-    def __init__(self):
-        self.scheduler = AsyncIOScheduler(
-            timezone=MOSCOW_TZ,
-            jobstores={
-                'default': MemoryJobStore()
-            },
-            executors={
-                'default': AsyncIOExecutor()
-            },
-            job_defaults={
-                'coalesce': False,
-                'max_instances': 1
-            }
-        )
     
     def start(self):
         """Запуск планировщика."""

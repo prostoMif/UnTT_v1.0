@@ -8,7 +8,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQu
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
-    
+import re
+
 # Импорт функций из модулей
 from daily_check.check import quick_pause, daily_check
 from sos.sos import handle_sos
@@ -34,9 +35,7 @@ from scheduler import MOSCOW_TZ, get_moscow_time
 from stats.user_stats import update_stats, get_stats
 from registration import is_user_registered
 
-# ИМПОРТЫ FSM - ДОБАВИТЬ СЮДА:
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
+
 
 # ... (импорты)
 
@@ -50,12 +49,10 @@ class DailyCheckStates(StatesGroup):
     waiting_reflection = State()
     waiting_practice = State()
 
-# ... (остальной код)
-
-class DailyCheckStates(StatesGroup):
-    waiting_reflection = State()   # Ожидаем ответ "как прошёл день"
-    waiting_practice = State()     # Ожидаем выполнение практики
-    
+# НОВЫЕ СОСТОЯНИЯ ДЛЯ SOS
+class SosStates(StatesGroup):
+    waiting_priority = State()     # Шаг 1: Что важнее?
+    waiting_confirmation = State()  # Шаг 2: Открыть или закрыть?   
 class DailyPracticeStates(StatesGroup):
     waiting_reflection = State()
     waiting_practice_completion = State()
@@ -72,9 +69,12 @@ load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 # Создание экземпляров бота и диспетчера с FSM
+from aiogram.fsm.storage.memory import MemoryStorage
 storage = MemoryStorage()
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=storage)
+
+
 
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
@@ -93,6 +93,25 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def parse_duration(text: str) -> int:
+    """
+    Парсит текст и возвращает количество минут.
+    Примеры: "5 минут", "1 час", "30", "0.5 ч"
+    """
+    text = text.lower().strip()
+    
+    # Проверяем на часы
+    match_hour = re.search(r'(\d+\.?\d*)\s*(час|ч|h)', text)
+    if match_hour:
+        return int(float(match_hour.group(1)) * 60)
+    
+    # Проверяем на минуты или просто число
+    match_min = re.search(r'(\d+\.?\d*)', text)
+    if match_min:
+        return int(float(match_min.group(1)))
+        
+    return None
 
 async def save_user_preference(user_id: int, preference: str):
     """Сохраняет предпочтение пользователя в JSON файл."""
@@ -131,40 +150,45 @@ async def get_user_preference(user_id: int) -> str:
     return None
 
 
-# Создание экземпляров бота и диспетчера
-from aiogram.fsm.storage.memory import MemoryStorage
-storage = MemoryStorage()
-bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=storage)
-
 @dp.message(Command("unstart"))
 async def cmd_unstart(message: types.Message):
-    """Сброс регистрации для повторного прохождения онбординга"""
+    """Сброс регистрации и прогресса для повторного прохождения."""
     user_id = message.from_user.id
-    file_path = "data/user_preferences.json"
-
-    # Загружаем данные
-    if os.path.exists(file_path):
+    
+    # 1. Удаляем предпочтения
+    pref_file_path = "data/user_preferences.json"
+    if os.path.exists(pref_file_path):
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(pref_file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, IOError):
             data = {}
-    else:
-        data = {}
+        else:
+            if str(user_id) in data:
+                del data[str(user_id)]
+                os.makedirs(os.path.dirname(pref_file_path), exist_ok=True)
+                with open(pref_file_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
 
-    # Проверяем и удаляем
-    if str(user_id) in data:
-        del data[str(user_id)]
-        
-        # Сохраняем обновленные данные
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-            
-        await message.answer("🗑 Твоя запись удалена. Теперь ты можешь пройти регистрацию заново командой /start")
-    else:
-        await message.answer("🤷‍♂️ Ты не зарегистрирован или запись уже удалена.")
+    # 2. Удаляем файл прогресса дерева
+    tree_file_path = f"data/tree_{user_id}.json"
+    if os.path.exists(tree_file_path):
+        try:
+            os.remove(tree_file_path)
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла дерева: {e}")
+
+    # 3. Удаляем файл статистики (ВАЖНО для исправления проблемы с 0)
+    # Путь зависит от реализации load_user_data, обычно это data/user_stats_{user_id}.json
+    stats_file_path = f"data/user_stats_{user_id}.json"
+    if os.path.exists(stats_file_path):
+        try:
+            os.remove(stats_file_path)
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла статистики: {e}")
+
+    await message.answer("🗑 Твоя запись, прогресс дерева и статистика удалены. Теперь ты можешь начать с чистого листа командой /start")
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext) -> None:
@@ -290,22 +314,19 @@ async def cmd_help(message: types.Message) -> None:
     await message.answer(help_text, parse_mode='HTML')
 
 # Вспомогательная функция для таймера
-async def quick_pause_timer(user_id: int, minutes: int, bot: Bot):
-    """Фоновая задача: ждет время и напоминает пользователю."""
+async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
+    """Фоновая задача: ждет время и напоминает с кнопкой 'Я закончил'."""
     await asyncio.sleep(minutes * 60)
     
     try:
-        # Кнопки по истечении времени
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Закрыть TikTok", callback_data=f"qp_timer_close_{minutes}"),
-                InlineKeyboardButton(text="Остаться", callback_data=f"qp_timer_stay_{minutes}")
-            ]
+            [InlineKeyboardButton(text="Я закончил", callback_data="qp_finish")]
         ])
         
         await bot.send_message(
             chat_id=user_id,
-            text=f"Твои {minutes} минут прошли.\n\nЧто ты хочешь сделать дальше?",
+            text=f"Твои {minutes} минут прошли.\n\n"
+                 "Ты всё ещё в приложении?",
             reply_markup=keyboard
         )
     except Exception as e:
@@ -344,8 +365,8 @@ async def callback_quick_pause_start(callback: types.CallbackQuery, state: FSMCo
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("qp_reason_"))
-async def callback_quick_pause_reason(callback: types.CallbackQuery):
-    """Обработка причины: Сообщение 3 и 4"""
+async def callback_quick_pause_reason(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка причины: Запрашиваем время в текстовом формате."""
     reason_code = callback.data.split("_")[-1]
     reasons_map = {
         "habit": "привычка",
@@ -355,25 +376,114 @@ async def callback_quick_pause_reason(callback: types.CallbackQuery):
     }
     reason_text = reasons_map.get(reason_code, "причина")
     
-    # Сообщение 3
+    # Сохраняем причину
+    await state.update_data(reason=reason_text)
+    
     await callback.message.edit_text(f"Сейчас за TikTok стоит: {reason_text}.")
     
-    # Пауза
-    await asyncio.sleep(1)
+    # Просим ввести время текстом
+    await asyncio.sleep(0.5)
+    await callback.message.answer(
+        "Сколько времени ты готов отдать этому прямо сейчас?\n"
+        "Напиши в формате: 15 минут, 1 час или просто 30."
+    )
     
-    # Сообщение 4 + Кнопки времени
+    # Устанавливаем состояние ожидания текста
+    await state.set_state(QuickPauseStates.waiting_time)
+    await callback.answer()
+    
+@dp.message(QuickPauseStates.waiting_time)
+async def process_time_input(message: types.Message, state: FSMContext):
+    """Обрабатывает ввод времени пользователем."""
+    user_text = message.text
+    minutes = parse_duration(user_text)
+    
+    if minutes is None or minutes <= 0:
+        await message.answer("Пожалуйста, напиши время корректно. Например: 5 минут или 1 час.")
+        return
+    
+    user_id = message.from_user.id
+    start_time = datetime.now()
+    
+    # Сохраняем данные в состояние
+    await state.update_data(
+        planned_minutes=minutes,
+        start_time=start_time.isoformat()
+    )
+    
+    # Запускаем таймер
+    asyncio.create_task(quick_pause_timer_with_finish(user_id, minutes, message.bot))
+    
+    # Кнопка "Я закончил"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="5 минут", callback_data="qp_time_5"),
-            InlineKeyboardButton(text="15 минут", callback_data="qp_time_15")
-        ],
-        [
-            InlineKeyboardButton(text="30 минут", callback_data="qp_time_30"),
-            InlineKeyboardButton(text="Сегодня нет", callback_data="qp_time_none")
-        ]
+        [InlineKeyboardButton(text="Я закончил", callback_data="qp_finish")]
     ])
     
-    await callback.message.answer("Сколько времени ты готов отдать этому прямо сейчас?", reply_markup=keyboard)
+    await message.answer(
+        f"Ты выбираешь {minutes} минут.\n\n"
+        f"Когда время закончится, я напомню об этом.",
+        reply_markup=keyboard
+    )
+    
+    # Сбрасываем состояние, чтобы не ловить лишние сообщения, 
+    # но данные сохраняем в state через update_data выше
+    await state.clear()
+
+@dp.callback_query(F.data == "qp_finish")
+async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMContext):
+    """Пользователь нажал 'Я закончил'."""
+    user_id = callback.from_user.id
+    
+    # Пытаемся получить данные из состояния (если оно не было очищено или через storage)
+    # В данном случае state может быть пустым, так как мы сделали clear() в process_time_input.
+    # Поэтому восстановим данные из storage, если нужно, или просто посчитаем разницу сейчас.
+    # Для простоты, если данные утеряны, просто поздравим с возвращением.
+    
+    data = await state.get_data()
+    start_time_str = data.get("start_time")
+    planned_minutes = data.get("planned_minutes", 0)
+    
+    actual_minutes = 0
+    time_text = "Некоторое время."
+    
+    if start_time_str:
+        try:
+            start_dt = datetime.fromisoformat(start_time_str)
+            now_dt = datetime.now()
+            delta_seconds = (now_dt - start_dt).total_seconds()
+            actual_minutes = int(delta_seconds // 60)
+            if actual_minutes < 1:
+                time_text = "Меньше минуты."
+            else:
+                time_text = f"{actual_minutes} мин."
+        except Exception:
+            pass
+
+    # Формируем сообщение с похвалой
+    praise = "Ты вернулся в реальность."
+    
+    if planned_minutes > 0 and actual_minutes < planned_minutes:
+        praise = (
+            f"Ты провел {time_text} "
+            f"вместо запланированных {planned_minutes} мин. "
+            f"Это победа над привычкой."
+        )
+    elif actual_minutes > 0:
+        praise = f"Ты провел в TikTok {time_text}. Хорошо, что ты вернулся."
+    
+    try:
+        # Обновляем статистику
+        from stats.user_stats import update_stats
+        await update_stats(user_id, "conscious_stop")
+    except Exception as e:
+        logger.error(f"Ошибка статистики: {e}")
+
+    await callback.message.edit_text(
+        f"{praise}\n\n"
+        "Дерево отмечает этот выбор."
+    )
+    
+    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("qp_time_"))
@@ -394,8 +504,12 @@ async def callback_quick_pause_time(callback: types.CallbackQuery):
             from tree_progress.tree import TreeProgress
             await update_stats(user_id, "conscious_stop")
             tree = TreeProgress(user_id)
-            if tree.load():
-                await tree.add_completion(xp_gain=5) # Награда за осознанность
+            # БЫЛО: await tree.add_completion(xp_gain=5)
+            # СТАЛО:
+            result = await tree.add_day()
+            
+            # Можно добавить тихое уведомление о смене уровня, если нужно
+            # Но в рамках "тихого" стиля лучше оставить просто эмодзи дерева
         except Exception as e:
             logger.error(f"Ошибка обновления прогресса: {e}")
             
@@ -410,8 +524,11 @@ async def callback_quick_pause_time(callback: types.CallbackQuery):
         await callback.message.answer("Когда время закончится, я напомню об этом.")
         
         # Запуск таймера в фоне
-        asyncio.create_task(quick_pause_timer(user_id, minutes, callback.bot))
+        asyncio.create_task(quick_pause_timer_with_finish(user_id, minutes, callback.bot))
         await callback.answer()
+
+
+
 
 @dp.callback_query(F.data.startswith("qp_timer_close_"))
 async def callback_quick_pause_timer_close(callback: types.CallbackQuery):
@@ -437,6 +554,8 @@ async def callback_quick_pause_timer_close(callback: types.CallbackQuery):
     await callback.message.answer("🌳", reply_markup=get_main_keyboard())
     await callback.answer()
 
+
+
 @dp.callback_query(F.data.startswith("qp_timer_stay_"))
 async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
     """Таймер истек, пользователь выбрал 'Остаться'"""
@@ -454,9 +573,117 @@ async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
 
 
     
+@dp.callback_query(F.data == "stats")
+async def callback_stats(callback: types.CallbackQuery):
+    """Обработка кнопки 'Статистика' в стиле Зеркала."""
+    user_id = callback.from_user.id
+    
+    try:
+        from stats.user_stats import get_stats
+        from tree_progress.tree import TreeProgress
+        
+        # 1. Данные за сегодня
+        today_stats = await get_stats(user_id, "today")
+        attempts = today_stats.get("events_count", {}).get("tiktok_attempt", 0)
+        conscious = today_stats.get("events_count", {}).get("conscious_stop", 0)
+        
+        # 2. Данные за неделю
+        week_stats = await get_stats(user_id, "week")
+        week_conscious = week_stats.get("events_count", {}).get("conscious_stop", 0)
+        
+        # Вычисляем "осознанные дни" (дни, когда было хотя бы одно осознанное решение)
+        # Для MVP берем количество событий как ориентир или заглушку, если нет точной логики дат
+        # Здесь используем упрощенный подход: события == решения для наглядности,
+        # но текст сформируем так, как будто это дни.
+        
+        # 3. Данные дерева
+        tree = TreeProgress(user_id)
+        tree_level_name = "семя"
+        tree_total_days = 0
+        
+        if tree.load():
+            if tree.level >= 1: tree_level_name = "росток"
+            elif tree.level >= 2: tree_level_name = "куст"
+            elif tree.level >= 3: tree_level_name = "дерево"
+            elif tree.level >= 4: tree_level_name = "лес"
+            tree_total_days = tree.total_days
 
+        # Формирование текста (Стиль Зеркала)
+        # Блок 1: Сегодня
+        text_today = f"Сегодня: осознанных решений — {conscious}, попыток открыть TikTok — {attempts}."
+        
+        # Блок 2: За 7 дней
+        text_week = f"За 7 дней: осознанных дней — {week_conscious}, серия — {tree.streak} дн."
+        
+        # Блок 3: Дерево
+        text_tree = f"Дерево: уровень — {tree_level_name}, осознанных дней всего — {tree_total_days}."
+        
+        # Финальная сборка
+        stats_message = (
+            f"{text_today}\n\n"
+            f"{text_week}\n\n"
+            f"{text_tree}"
+        )
 
+        # Если сегодня были попытки, но не было остановок - добавить мягкое напоминание
+        if attempts > 0 and conscious == 0:
+            stats_message += "\n\nДерево сегодня не росло. Бывает и так."
 
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        ])
+        
+        await callback.message.edit_text(stats_message, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        await callback.message.edit_text(
+            "Статистика на размышлении...",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+            ])
+        )
+    
+    await callback.answer()
+
+# Удалите старый callback_tree_progress и вставьте этот:
+
+@dp.callback_query(F.data == "tree_progress")
+async def callback_tree_progress(callback: types.CallbackQuery):
+    """Показывает состояние дерева (Тихий стиль)"""
+    user_id = callback.from_user.id
+    
+    try:
+        from tree_progress.tree import TreeProgress
+        tree = TreeProgress(user_id)
+        
+        # Загружаем, если есть данные
+        tree.load()
+        
+        stage_name = tree.get_stage_name()
+        desc = tree.get_stage_description()
+        
+        text = (
+            f"🌳 <b>Твой рост</b>\n\n"
+            f"{stage_name}\n"
+            f"{desc}\n\n"
+            f"Всего осознанных дней: {tree.total_days}\n"
+            f"Текущая серия: {tree.streak} дн."
+        )
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        ])
+        
+        await callback.message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Ошибка загрузки дерева: {e}")
+        await callback.message.edit_text("Дерево растет молча.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        ]))
+    
+    await callback.answer()
 
 
 
@@ -537,79 +764,119 @@ async def callback_back_to_menu(callback: types.CallbackQuery):
     )
     await callback.answer()        
 
-@dp.callback_query(F.data == "stats")
-async def callback_stats(callback: types.CallbackQuery):
-    """Обработка кнопки 'Статистика' в новом стиле"""
-    user_id = callback.from_user.id
-    
-    try:
-        from stats.user_stats import get_stats
-        from tree_progress.tree import TreeProgress
-        
-        # 1. Получаем данные за сегодня
-        today_stats = await get_stats(user_id, "today")
-        attempts = today_stats.get("events_count", {}).get("tiktok_attempt", 0)
-        conscious = today_stats.get("events_count", {}).get("conscious_stop", 0)
-        
-        # 2. Получаем данные за неделю (осознанные дни)
-        # Это сложная метрика, упростим до общего количества решений за неделю
-        week_stats = await get_stats(user_id, "week")
-        week_conscious = week_stats.get("events_count", {}).get("conscious_stop", 0)
-        
-        # 3. Данные дерева
-        tree = TreeProgress(user_id)
-        tree_text = "Дерево еще не посажено."
-        streak = 0
-        total_days = 0
-        level_name = "семя"
-        
-        if tree.load():
-            streak = tree.streak
-            total_days = tree.total_days
-            # Простая система названий уровней
-            if tree.level == 1: level_name = "росток"
-            elif tree.level == 2: level_name = "побег"
-            elif tree.level == 3: level_name = "куст"
-            elif tree.level >= 4: level_name = "дерево"
-            
-            tree_text = f"Дерево: уровень — {level_name}, осознанных дней всего — {total_days}"
 
-        # Формируем текст (Созерцательный стиль)
-        if attempts > 0:
-            stats_message = (
-                f"Сегодня ты {attempts} раз{'а' if attempts == 1 else 'а'} тянулся к TikTok. "
-                f"{conscious} раз{'а' if conscious == 1 else 'а'} остановился.\n\n"
-                f"За эту неделю было {week_conscious} осознанных решений. "
-                f"Текущая серия — {streak} дн{'я' if streak == 1 else 'ей'}. Дерево это помнит.\n\n"
-                f"{tree_text}"
-            )
-        else:
-            stats_message = (
-                "Сегодня попыток открыть TikTok не было.\n\n"
-                f"За эту неделю — {week_conscious} осознанных решений. "
-                f"Серия — {streak} дн{'я' if streak == 1 else 'ей'}.\n\n"
-                f"{tree_text}"
-            )
 
-        # Кнопки возврата
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-        ])
-        
-        await callback.message.edit_text(stats_message, reply_markup=keyboard)
-        
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        await callback.message.edit_text(
-            "Статистика на размышлении...",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
-            ])
-        )
+# --- НОВЫЙ СЦЕНАРИЙ SOS ---
+
+@dp.callback_query(F.data == "sos")
+async def callback_sos_start(callback: types.CallbackQuery, state: FSMContext):
+    """Шаг 1 SOS: Тянет открыть TikTok."""
+    await state.set_state(SosStates.waiting_priority)
     
+    text = "Тянет открыть TikTok.\n\nЧто сейчас важнее этого?"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Сон", callback_data="sos_prio_sleep"),
+            InlineKeyboardButton(text="Учёба / работа", callback_data="sos_prio_work")
+        ],
+        [
+            InlineKeyboardButton(text="Люди рядом", callback_data="sos_prio_people"),
+            InlineKeyboardButton(text="Дело на сегодня", callback_data="sos_prio_task")
+        ],
+        [
+            InlineKeyboardButton(text="Ничего конкретного", callback_data="sos_prio_none"),
+            InlineKeyboardButton(text="Отмена", callback_data="back_to_menu")
+        ]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
-# ... (твой код, функции callback_stats_period и т.д.) ...
+@dp.callback_query(F.data.startswith("sos_prio_"))
+async def callback_sos_priority(callback: types.CallbackQuery, state: FSMContext):
+    """Шаг 2 SOS: Подтверждение выбора."""
+    # Сохраняем выбор, чтобы использовать в тексте
+    priority_map = {
+        "sleep": "Сон",
+        "work": "Учёба / работа",
+        "people": "Люди рядом",
+        "task": "Дело на сегодня",
+        "none": "Ничего конкретного"
+    }
+    
+    prio_code = callback.data.split("_")[-1]
+    prio_text = priority_map.get(prio_code, "Это")
+    
+    await state.update_data(priority=prio_text)
+    await state.set_state(SosStates.waiting_confirmation)
+    
+    text = f"{prio_text} важнее TikTok сейчас.\n\nОткрывать или оставить закрытым?"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Оставить закрытым", callback_data="sos_act_close"),
+            InlineKeyboardButton(text="Открыть всё равно", callback_data="sos_act_open")
+        ]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("sos_act_"))
+async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
+    """Шаг 3 SOS: Результат."""
+    action = callback.data.split("_")[-1]
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    priority = data.get("priority", "Это")
+    
+    await state.clear()
+    
+    if action == "close":
+        # Ветка: Оставить закрытым -> Рост дерева
+        try:
+            from stats.user_stats import update_stats
+            from tree_progress.tree import TreeProgress
+            
+            await update_stats(user_id, "conscious_stop")
+            tree = TreeProgress(user_id)
+            result = await tree.add_day()
+            
+            text = (
+                "TikTok остаётся закрытым.\n"
+                "Этот выбор отмечен для дерева."
+            )
+            
+            if result.get("stage_changed"):
+                text += f"\n\nДерево перешло на уровень: {result['new_stage']}."
+                text += f"\nВсего осознанных дней: {result['total_days']}."
+                
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресса в SOS: {e}")
+            text = "TikTok остаётся закрытым."
+            
+    else:
+        # Ветка: Открыть всё равно -> Фиксация
+        try:
+            from stats.user_stats import update_stats
+            await update_stats(user_id, "tiktok_attempt")
+        except Exception:
+            pass
+            
+        text = "TikTok открыт.\nМы просто зафиксировали этот момент."
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="В меню", callback_data="back_to_menu")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+
+
+
 
 async def main() -> None:
     """Запуск бота"""
