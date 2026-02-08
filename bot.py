@@ -289,66 +289,176 @@ async def cmd_help(message: types.Message) -> None:
     )
     await message.answer(help_text, parse_mode='HTML')
 
+# Вспомогательная функция для таймера
+async def quick_pause_timer(user_id: int, minutes: int, bot: Bot):
+    """Фоновая задача: ждет время и напоминает пользователю."""
+    await asyncio.sleep(minutes * 60)
+    
+    try:
+        # Кнопки по истечении времени
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Закрыть TikTok", callback_data=f"qp_timer_close_{minutes}"),
+                InlineKeyboardButton(text="Остаться", callback_data=f"qp_timer_stay_{minutes}")
+            ]
+        ])
+        
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"Твои {minutes} минут прошли.\n\nЧто ты хочешь сделать дальше?",
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке таймера: {e}")
+
+# --- НОВАЯ ЛОГИКА "ИДУ В TIKTOK" ---
 
 @dp.callback_query(F.data == "quick_pause")
-async def callback_quick_pause(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.message.edit_text("⏸️ Зачем ты открываешь TikTok?")
-    await state.set_state(QuickPauseStates.waiting_purpose)
-    
-    # Обновляем статистику - ВАЖНО!
+async def callback_quick_pause_start(callback: types.CallbackQuery, state: FSMContext):
+    """Старт сценария: Сообщение 1 и 2"""
+    # Учитываем попытку в статистике
     try:
         from stats.user_stats import update_stats
-        await update_stats(callback.from_user.id, "quick_pause")
-        print(f"Статистика quick_pause обновлена для user_id {callback.from_user.id}")
+        await update_stats(callback.from_user.id, "tiktok_attempt")
     except Exception as e:
-        print(f"Ошибка обновления статистики quick_pause: {e}")
-        logger.error(f"Ошибка обновления статистики quick_pause: {e}")
-    
-# Обработчики для QuickPause
-@dp.message(QuickPauseStates.waiting_purpose)
-async def handle_purpose(message: types.Message, state: FSMContext):
-    purpose = message.text.strip()
-    await state.update_data(purpose=purpose)
-    
-    await message.answer(
-        f"✅ Цель: {purpose}\n\n"
-        "Сколько минут планируешь провести в TikTok?"
-    )
-    await state.set_state(QuickPauseStates.waiting_time)
+        logger.error(f"Ошибка статистики (attempt): {e}")
 
-@dp.message(QuickPauseStates.waiting_time)
-async def handle_time(message: types.Message, state: FSMContext):
-    time_str = message.text.strip()
-    await state.update_data(time_str=time_str)
+    # Сообщение 1
+    await callback.message.edit_text("Ты собираешься открыть TikTok.")
     
-    data = await state.get_data()
+    # Пауза (имитация) и Сообщение 2
+    await asyncio.sleep(1.5) # Небольшая пауза для атмосферы
     
-    await message.answer(
-        f"📋 Подтверждение:\n"
-        f"🎯 Цель: {data['purpose']}\n"
-        f"⏰ Время: {time_str}\n\n"
-        "Напиши 'да' для подтверждения или 'нет' для отмены"
-    )
-    await state.set_state(QuickPauseStates.confirmation)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Привычка", callback_data="qp_reason_habit"),
+            InlineKeyboardButton(text="Усталость", callback_data="qp_reason_fatigue")
+        ],
+        [
+            InlineKeyboardButton(text="Отвлечься от дел", callback_data="qp_reason_distraction"),
+            InlineKeyboardButton(text="Просто интересно", callback_data="qp_reason_interest")
+        ]
+    ])
+    
+    await callback.message.answer("Что за этим сейчас стоит?", reply_markup=keyboard)
+    await callback.answer()
 
-@dp.message(QuickPauseStates.confirmation)
-async def handle_confirmation(message: types.Message, state: FSMContext):
-    confirmation = message.text.strip().lower()
+@dp.callback_query(F.data.startswith("qp_reason_"))
+async def callback_quick_pause_reason(callback: types.CallbackQuery):
+    """Обработка причины: Сообщение 3 и 4"""
+    reason_code = callback.data.split("_")[-1]
+    reasons_map = {
+        "habit": "привычка",
+        "fatigue": "усталость",
+        "distraction": "отвлечение",
+        "interest": "интерес"
+    }
+    reason_text = reasons_map.get(reason_code, "причина")
     
-    if confirmation in ['да', 'yes', 'подтверждаю']:
-        data = await state.get_data()
+    # Сообщение 3
+    await callback.message.edit_text(f"Сейчас за TikTok стоит: {reason_text}.")
+    
+    # Пауза
+    await asyncio.sleep(1)
+    
+    # Сообщение 4 + Кнопки времени
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="5 минут", callback_data="qp_time_5"),
+            InlineKeyboardButton(text="15 минут", callback_data="qp_time_15")
+        ],
+        [
+            InlineKeyboardButton(text="30 минут", callback_data="qp_time_30"),
+            InlineKeyboardButton(text="Сегодня нет", callback_data="qp_time_none")
+        ]
+    ])
+    
+    await callback.message.answer("Сколько времени ты готов отдать этому прямо сейчас?", reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("qp_time_"))
+async def callback_quick_pause_time(callback: types.CallbackQuery):
+    """Обработка выбора времени"""
+    time_code = callback.data.split("_")[-1]
+    user_id = callback.from_user.id
+    
+    if time_code == "none":
+        # Ветка: "Сегодня нет"
+        await callback.message.edit_text("Сегодня TikTok остаётся закрытым.")
+        await asyncio.sleep(1)
+        await callback.message.answer("Этот день пойдёт в рост дерева.")
         
-        # Здесь вызывай функцию сохранения
-        # await save_pause_data(message.from_user.id, data)
+        # Статистика: Осознанное решение + Рост дерева
+        try:
+            from stats.user_stats import update_stats
+            from tree_progress.tree import TreeProgress
+            await update_stats(user_id, "conscious_stop")
+            tree = TreeProgress(user_id)
+            if tree.load():
+                await tree.add_completion(xp_gain=5) # Награда за осознанность
+        except Exception as e:
+            logger.error(f"Ошибка обновления прогресса: {e}")
+            
+        await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+        await callback.answer()
         
-        await message.answer(
-            "✅ Быстрая пауза установлена!",
-            reply_markup=get_main_keyboard()
-        )
-        await state.clear()
     else:
-        await message.answer("❌ Пауза отменена.")
-        await state.clear()
+        # Ветка: 5 / 15 / 30 минут
+        minutes = int(time_code)
+        await callback.message.edit_text(f"Ты выбираешь {minutes} минут.")
+        await asyncio.sleep(1)
+        await callback.message.answer("Когда время закончится, я напомню об этом.")
+        
+        # Запуск таймера в фоне
+        asyncio.create_task(quick_pause_timer(user_id, minutes, callback.bot))
+        await callback.answer()
+
+@dp.callback_query(F.data.startswith("qp_timer_close_"))
+async def callback_quick_pause_timer_close(callback: types.CallbackQuery):
+    """Таймер истек, пользователь выбрал 'Закрыть TikTok'"""
+    user_id = callback.from_user.id
+    # minutes = int(callback.data.split("_")[-1]) # Можно использовать для логов
+    
+    await callback.message.edit_text("Ты остановился там, где обычно продолжаешь.")
+    await asyncio.sleep(1)
+    await callback.message.answer("Этот день пойдёт в рост дерева.")
+    
+    # Статистика: Осознанное решение + Рост дерева
+    try:
+        from stats.user_stats import update_stats
+        from tree_progress.tree import TreeProgress
+        await update_stats(user_id, "conscious_stop")
+        tree = TreeProgress(user_id)
+        if tree.load():
+            await tree.add_completion(xp_gain=5)
+    except Exception as e:
+        logger.error(f"Ошибка обновления прогресса: {e}")
+
+    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("qp_timer_stay_"))
+async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
+    """Таймер истек, пользователь выбрал 'Остаться'"""
+    user_id = callback.from_user.id
+    
+    await callback.message.edit_text("Сегодня ты решил остаться в ленте.")
+    await asyncio.sleep(1)
+    await callback.message.answer("Мы просто отметим этот момент.")
+    
+    # Статистика: только фиксация (без осознанного решения и роста)
+    # Метрика 'tiktok_attempt' уже была добавлена в начале.
+    
+    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+    await callback.answer()
+
+
+    
+
+
+
+
+
 
 
 
@@ -427,23 +537,76 @@ async def callback_back_to_menu(callback: types.CallbackQuery):
     )
     await callback.answer()        
 
-@dp.callback_query(F.data.startswith("stats_"))
-async def callback_stats_period(callback: types.CallbackQuery):
-    """Обработка выбора периода статистики"""
-    period = callback.data.replace("stats_", "")
+@dp.callback_query(F.data == "stats")
+async def callback_stats(callback: types.CallbackQuery):
+    """Обработка кнопки 'Статистика' в новом стиле"""
     user_id = callback.from_user.id
     
-    # Пока заглушка - показываем базовую статистику
-    await callback.message.answer(
-        f"📊 <b>Статистика за {period}</b>\n\n"
-        f"🎯 Всего практик: 0\n"
-        f"⭐ Получено XP: 0\n\n"
-        f"Начните выполнять практики для отслеживания прогресса!",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Назад к статистике", callback_data="stats")]
+    try:
+        from stats.user_stats import get_stats
+        from tree_progress.tree import TreeProgress
+        
+        # 1. Получаем данные за сегодня
+        today_stats = await get_stats(user_id, "today")
+        attempts = today_stats.get("events_count", {}).get("tiktok_attempt", 0)
+        conscious = today_stats.get("events_count", {}).get("conscious_stop", 0)
+        
+        # 2. Получаем данные за неделю (осознанные дни)
+        # Это сложная метрика, упростим до общего количества решений за неделю
+        week_stats = await get_stats(user_id, "week")
+        week_conscious = week_stats.get("events_count", {}).get("conscious_stop", 0)
+        
+        # 3. Данные дерева
+        tree = TreeProgress(user_id)
+        tree_text = "Дерево еще не посажено."
+        streak = 0
+        total_days = 0
+        level_name = "семя"
+        
+        if tree.load():
+            streak = tree.streak
+            total_days = tree.total_days
+            # Простая система названий уровней
+            if tree.level == 1: level_name = "росток"
+            elif tree.level == 2: level_name = "побег"
+            elif tree.level == 3: level_name = "куст"
+            elif tree.level >= 4: level_name = "дерево"
+            
+            tree_text = f"Дерево: уровень — {level_name}, осознанных дней всего — {total_days}"
+
+        # Формируем текст (Созерцательный стиль)
+        if attempts > 0:
+            stats_message = (
+                f"Сегодня ты {attempts} раз{'а' if attempts == 1 else 'а'} тянулся к TikTok. "
+                f"{conscious} раз{'а' if conscious == 1 else 'а'} остановился.\n\n"
+                f"За эту неделю было {week_conscious} осознанных решений. "
+                f"Текущая серия — {streak} дн{'я' if streak == 1 else 'ей'}. Дерево это помнит.\n\n"
+                f"{tree_text}"
+            )
+        else:
+            stats_message = (
+                "Сегодня попыток открыть TikTok не было.\n\n"
+                f"За эту неделю — {week_conscious} осознанных решений. "
+                f"Серия — {streak} дн{'я' if streak == 1 else 'ей'}.\n\n"
+                f"{tree_text}"
+            )
+
+        # Кнопки возврата
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
         ])
-    )
+        
+        await callback.message.edit_text(stats_message, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        await callback.message.edit_text(
+            "Статистика на размышлении...",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+            ])
+        )
+    
     await callback.answer()
 
 # ... (твой код, функции callback_stats_period и т.д.) ...

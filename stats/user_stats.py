@@ -33,31 +33,36 @@ class UserStats:
             logger.error(f"Ошибка загрузки статистики для user_id {self.user_id}: {e}")
             return self._create_default_stats()
     
-    def _create_default_stats(self) -> Dict:
-        """Создает структуру статистики по умолчанию."""
-        return {
-            "user_id": self.user_id,
-            "created_at": get_moscow_time().isoformat(),
-            "events": {
-                "quick_pause": [],
-                "sos": [],
-                "daily_practice": [],
-                "tree_growth": []
-            },
-            "streaks": {
-                "current": 0,
-                "best": 0,
-                "last_active_date": None
-            },
-            "summary": {
-                "total_events": 0,
-                "total_pauses": 0,
-                "total_sos": 0,
-                "total_practices": 0,
-                "total_tree_growth": 0,
-                "active_days": 0
+        def _create_default_stats(self) -> Dict:
+            """Создает структуру статистики по умолчанию."""
+            return {
+                "user_id": self.user_id,
+                "created_at": get_moscow_time().isoformat(),
+                "events": {
+                    "quick_pause": [],
+                    "sos": [],
+                    "daily_practice": [],
+                    "tree_growth": [],
+                    "tiktok_attempt": [],   # <--- ДОБАВЬ ЭТО
+                    "conscious_stop": []    # <--- ДОБАВЬ ЭТО
+                },
+                "streaks": {
+                    "current": 0,
+                    "best": 0,
+                    "last_active_date": None
+                },
+                "summary": {
+                    "total_events": 0,
+                    "total_pauses": 0,
+                    "total_sos": 0,
+                    "total_practices": 0,
+                    "total_tree_growth": 0,
+                    # Можно добавить счетчики для новых событий, если нужны:
+                    # "total_attempts": 0,
+                    # "total_conscious_stops": 0,
+                    "active_days": 0
+                }
             }
-        }
     
     def _save_stats(self, stats_data: Dict = None) -> bool:
         """Сохраняет статистику пользователя."""
