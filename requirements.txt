@@ -1,5 +1,5 @@
-aiogram==3.24.0
-python-dotenv>=1.0.0
+aiogram>=3.0.0,<4.0.0
+python-dotenv
 requests>=2.31.0
 pandas>=2.0.0
 matplotlib>=3.8.0

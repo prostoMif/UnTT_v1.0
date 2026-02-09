@@ -9,23 +9,54 @@ from daily_practice.schedule import get_moscow_time
 
 logger = logging.getLogger(__name__)
 
-
 class UserStats:
     """Класс для управления статистикой пользователя."""
     
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.stats_key = f"user_stats_{user_id}"
-        self.data = self._load_stats()
-    
-    def _load_stats(self) -> Dict:
-        """Загружает статистику пользователя с поддержкой старых форматов."""
+        self.data = None  # Данные будут загружены при первом запросе (lazy loading)
+
+    def _create_default_stats(self) -> Dict:
+        """Создает структуру статистики по умолчанию."""
+        return {
+            "user_id": self.user_id,
+            "created_at": get_moscow_time().isoformat(),
+            "events": {
+                "quick_pause": [],
+                "sos": [],
+                "daily_practice": [],
+                "tree_growth": [],
+                "tiktok_attempt": [],
+                "conscious_stop": []
+            },
+            "streaks": {
+                "current": 0,
+                "best": 0,
+                "last_active_date": None
+            },
+            "summary": {
+                "total_events": 0,
+                "total_pauses": 0,
+                "total_sos": 0,
+                "total_practices": 0,
+                "total_tree_growth": 0,
+                "active_days": 0,
+                "slips_today": 0
+            },
+            "last_slip_date": None
+        }
+
+    async def _load_stats(self) -> Dict:
+        """Асинхронно загружает статистику пользователя."""
         try:
+            # load_user_data - СИНХРОННАЯ функция, await НЕ нужен
             stats_data = load_user_data(self.stats_key)
+            
             if not stats_data:
-                # Если файла нет, создаем дефолтный
+                # Если файла нет, создаем дефолтный и сохраняем
                 stats_data = self._create_default_stats()
-                self._save_stats(stats_data)
+                await self._save_stats(stats_data)
                 return stats_data
             
             # МИГРАЦИЯ: Проверяем, есть ли новые ключи в старом файле
@@ -51,74 +82,21 @@ class UserStats:
         except Exception as e:
             logger.error(f"Ошибка загрузки статистики для user_id {self.user_id}: {e}")
             return self._create_default_stats()
-    
-    def _create_default_stats(self) -> Dict:
-        """Создает структуру статистики по умолчанию."""
-        return {
-            "user_id": self.user_id,
-            "created_at": get_moscow_time().isoformat(),
-            "events": {
-                "quick_pause": [],
-                "sos": [],
-                "daily_practice": [],
-                "tree_growth": [],
-                "tiktok_attempt": [],
-                "conscious_stop": []
-            },
-            "streaks": {
-                "current": 0,
-                "best": 0,
-                "last_active_date": None
-            },
-            "summary": {
-                "total_events": 0,
-                "total_pauses": 0,
-                "total_sos": 0,
-                "total_practices": 0,
-                "total_tree_growth": 0,
-                "active_days": 0
-            }
-        }
-    
-    def _save_stats(self, stats_data: Dict = None) -> bool:
-        """Сохраняет статистику пользователя."""
+
+    async def _save_stats(self, stats_data: Dict = None) -> bool:
+        """Асинхронно сохраняет статистику пользователя."""
         try:
             data_to_save = stats_data or self.data
             data_to_save["updated_at"] = get_moscow_time().isoformat()
-            save_user_data(self.stats_key, data_to_save)
+            
+            # Меняем местами аргументы: сначала данные, потом ключ
+            await save_user_data(data_to_save, self.stats_key)
             return True
         except Exception as e:
             logger.error(f"Ошибка сохранения статистики для user_id {self.user_id}: {e}")
             return False
-    
-    def _add_event(self, event_type: str, event_data: Dict = None) -> None:
-        """Добавляет событие в статистику."""
-        event_data = event_data or {}
-        event_data.update({
-            "timestamp": get_moscow_time().isoformat(),
-            "date": get_moscow_time().date().isoformat()
-        })
-        
-        self.data["events"][event_type].append(event_data)
-        self.data["summary"]["total_events"] += 1
-        
-        # Обновляем счетчики по типам
-        if event_type == "quick_pause":
-            self.data["summary"]["total_pauses"] += 1
-        elif event_type == "sos":
-            self.data["summary"]["total_sos"] += 1
-        elif event_type == "daily_practice":
-            self.data["summary"]["total_practices"] += 1
-        elif event_type == "tree_growth":
-            self.data["summary"]["total_tree_growth"] += 1
-        
-        # Обновляем streak
-        self._update_streak()
-        
-        # Сохраняем изменения
-        self._save_stats()
-    
-    def _update_streak(self) -> None:
+
+    async def _update_streak(self) -> None:
         """Обновляет информацию о серии активных дней."""
         today = get_moscow_time().date()
         last_active = self.data["streaks"]["last_active_date"]
@@ -142,25 +120,54 @@ class UserStats:
         
         self.data["streaks"]["last_active_date"] = today.isoformat()
         self.data["summary"]["active_days"] += 1
-    
-    def update_stats(self, event_type: str, event_data: Dict = None) -> bool:
-        """Обновляет статистику пользователя."""
+
+    async def _add_event(self, event_type: str, event_data: Dict = None) -> None:
+        """Добавляет событие в статистику."""
+        event_data = event_data or {}
+        event_data.update({
+            "timestamp": get_moscow_time().isoformat(),
+            "date": get_moscow_time().date().isoformat()
+        })
+        
+        self.data["events"][event_type].append(event_data)
+        self.data["summary"]["total_events"] += 1
+        
+        # Обновляем счетчики по типам
+        if event_type == "quick_pause":
+            self.data["summary"]["total_pauses"] += 1
+        elif event_type == "sos":
+            self.data["summary"]["total_sos"] += 1
+        elif event_type == "daily_practice":
+            self.data["summary"]["total_practices"] += 1
+        elif event_type == "tree_growth":
+            self.data["summary"]["total_tree_growth"] += 1
+        
+        # Обновляем streak
+        await self._update_streak()
+        
+        # Сохраняем изменения
+        await self._save_stats()
+
+    async def update_stats(self, event_type: str, event_data: Dict = None) -> bool:
+        """Публичный метод для обновления статистики."""
         try:
-            if event_type not in self.data["events"]:
-                logger.warning(f"Неизвестный тип события: {event_type}")
-                return False
-            
-            self._add_event(event_type, event_data)
-            logger.info(f"Статистика обновлена для user_id {self.user_id}: {event_type}")
+            # Если данные еще не загружены, загружаем их
+            if self.data is None:
+                self.data = await self._load_stats()
+                
+            await self._add_event(event_type, event_data)
             return True
-            
         except Exception as e:
-            logger.error(f"Ошибка обновления статистики: {e}")
+            logger.error(f"Ошибка в update_stats: {e}")
             return False
-    
-    def get_stats(self, period: str = "total") -> Dict:
+
+    async def get_stats(self, period: str = "total") -> Dict:
         """Получает статистику пользователя за указанный период."""
         try:
+            # Если данные еще не загружены, загружаем их
+            if self.data is None:
+                self.data = await self._load_stats()
+
             today = get_moscow_time().date()
             
             if period == "day":
@@ -202,13 +209,104 @@ class UserStats:
             
         except Exception as e:
             logger.error(f"Ошибка получения статистики: {e}")
-            return {"error": str(e)}    
+            return {"error": str(e)}
 
-# Вспомогательные асинхронные функции
-async def update_stats(user_id: int, event_type: str, event_data: Dict = None) -> bool:
-    stats = UserStats(user_id)
-    return stats.update_stats(event_type, event_data)
+    async def increment_slip(self) -> int:
+        """
+        Увеличивает счетчик срывов за сегодня.
+        Сбрасывает счетчик, если наступил новый день (после 7:00 МСК).
+        Возвращает текущее значение счетчика.
+        """
+        now = get_moscow_time()
+        
+        # Логика "Новый день" начинается в 07:00
+        # Если сейчас раньше 7 утра, считаем, что всё еще "вчерашний" день
+        today_date = now.date()
+        if now.hour < 7:
+            today_date = today_date - timedelta(days=1)
 
-async def get_stats(user_id: int, period: str = "total") -> Dict:
-    stats = UserStats(user_id)
-    return stats.get_stats(period)
+        last_slip_str = self.data.get("last_slip_date")
+        reset_needed = False
+
+        if last_slip_str:
+            # Парсим дату последнего срыва (хранится как ISO date string, YYYY-MM-DD)
+            # Если хранится полный ISO timestamp, берем только дату
+            try:
+                if "T" in last_slip_str:
+                    last_date = datetime.fromisoformat(last_slip_str).date()
+                else:
+                    last_date = datetime.strptime(last_slip_str, "%Y-%m-%d").date()
+                
+                if last_date < today_date:
+                    reset_needed = True
+            except Exception:
+                reset_needed = True
+        else:
+            reset_needed = True
+
+        if reset_needed:
+            self.data["summary"]["slips_today"] = 0
+
+        # Увеличиваем счетчик
+        current_count = self.data["summary"].get("slips_today", 0) + 1
+        self.data["summary"]["slips_today"] = current_count
+        
+        # Сохраняем дату последнего срыва (только дата, без времени)
+        self.data["last_slip_date"] = today_date.isoformat()
+        
+        await self._save_stats()
+        return current_count   
+    
+    
+
+# --- Асинхронные обертки (добавить после класса) ---
+
+async def update_stats(user_id: int, event_type: str, event_data: dict = None) -> bool:
+    """Асинхронная функция-обертка для обновления статистики."""
+    try:
+        stats = UserStats(user_id)
+        return await stats.update_stats(event_type, event_data)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Ошибка в async wrapper update_stats для user {user_id}: {e}")
+        return False
+
+async def get_stats(user_id: int, period: str = "total") -> dict:
+    """Асинхронная функция-обертка для получения статистики."""
+    try:
+        stats = UserStats(user_id)
+        return await stats.get_stats(period)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Ошибка в async wrapper get_stats для user {user_id}: {e}")
+        return {}
+
+
+
+
+
+
+
+# --- Асинхронные обертки (обязательно заменить старые) ---
+
+async def update_stats(user_id: int, event_type: str, event_data: dict = None) -> bool:
+    """Асинхронная функция-обертка для обновления статистики."""
+    try:
+        stats = UserStats(user_id)
+        # ВАЖНО: Добавляем await, так как метод класса теперь асинхронный
+        return await stats.update_stats(event_type, event_data)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Ошибка в async wrapper update_stats для user {user_id}: {e}")
+        return False
+
+async def get_stats(user_id: int, period: str = "total") -> dict:
+    """Асинхронная функция-обертка для получения статистики."""
+    try:
+        stats = UserStats(user_id)
+        # ВАЖНО: Добавляем await, так как метод класса теперь асинхронный
+        return await stats.get_stats(period)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Ошибка в async wrapper get_stats для user {user_id}: {e}")
+        return {}

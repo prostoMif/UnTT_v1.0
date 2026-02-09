@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import json
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -74,7 +75,7 @@ storage = MemoryStorage()
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=storage)
 
-
+active_timers = {}
 
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
@@ -83,16 +84,16 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="Иду в Tik Tok", callback_data="quick_pause"),
             # InlineKeyboardButton(text=" Дневная практика", callback_data="daily_practice")
-        ],
-        [
-            InlineKeyboardButton(text=" Дерево прогресса", callback_data="tree_progress"),
-            InlineKeyboardButton(text=" Статистика", callback_data="stats")
-        ],
-        [
             InlineKeyboardButton(text=" SOS", callback_data="sos")
+        ],
+        [
+            # InlineKeyboardButton(text=" Дерево прогресса", callback_data="tree_progress"),
+            InlineKeyboardButton(text=" Статистика", callback_data="stats")
         ]
+        
     ]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    pass 
 
 def parse_duration(text: str) -> int:
     """
@@ -313,14 +314,16 @@ async def cmd_help(message: types.Message) -> None:
     )
     await message.answer(help_text, parse_mode='HTML')
 
-# Вспомогательная функция для таймера
 async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
     """Фоновая задача: ждет время и напоминает с кнопкой 'Я закончил'."""
-    await asyncio.sleep(minutes * 60)
-    
     try:
+        await asyncio.sleep(minutes * 60)
+        
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Я закончил", callback_data="qp_finish")]
+            [
+                InlineKeyboardButton(text="Я закончил", callback_data="qp_finish"),
+                InlineKeyboardButton(text="Я остаюсь", callback_data="qp_timer_stay_action")
+             ]
         ])
         
         await bot.send_message(
@@ -329,8 +332,13 @@ async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
                  "Ты всё ещё в приложении?",
             reply_markup=keyboard
         )
-    except Exception as e:
-        logger.error(f"Ошибка при отправке таймера: {e}")
+    except asyncio.CancelledError:
+        # Таймер был отменен (нажали "Я закончил")
+        pass
+    finally:
+        # Удаляем себя из списка активных при завершении или отмене
+        if user_id in active_timers:
+            del active_timers[user_id]
 
 # --- НОВАЯ ЛОГИКА "ИДУ В TIKTOK" ---
 
@@ -411,8 +419,9 @@ async def process_time_input(message: types.Message, state: FSMContext):
         start_time=start_time.isoformat()
     )
     
-    # Запускаем таймер
-    asyncio.create_task(quick_pause_timer_with_finish(user_id, minutes, message.bot))
+    # Запускаем таймер и сохраняем ссылку на задачу
+    task = asyncio.create_task(quick_pause_timer_with_finish(user_id, minutes, message.bot))
+    active_timers[user_id] = task
     
     # Кнопка "Я закончил"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -434,11 +443,14 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
     """Пользователь нажал 'Я закончил'."""
     user_id = callback.from_user.id
     
-    # Пытаемся получить данные из состояния (если оно не было очищено или через storage)
-    # В данном случае state может быть пустым, так как мы сделали clear() в process_time_input.
-    # Поэтому восстановим данные из storage, если нужно, или просто посчитаем разницу сейчас.
-    # Для простоты, если данные утеряны, просто поздравим с возвращением.
+    # Проверяем, есть ли активный таймер и отменяем его
+    if user_id in active_timers:
+        task = active_timers[user_id]
+        if not task.done():
+            task.cancel() # Останавливаем фоновую задачу
+        del active_timers[user_id]
     
+    # ВОССТАНОВЛЕННАЯ ЛОГИКА: Получаем данные и вычисляем время
     data = await state.get_data()
     start_time_str = data.get("start_time")
     planned_minutes = data.get("planned_minutes", 0)
@@ -458,6 +470,7 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
                 time_text = f"{actual_minutes} мин."
         except Exception:
             pass
+    # КОНЕЦ ВОССТАНОВЛЕННОЙ ЛОГИКИ
 
     # Формируем сообщение с похвалой
     praise = "Ты вернулся в реальность."
@@ -568,9 +581,24 @@ async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
     # Статистика: только фиксация (без осознанного решения и роста)
     # Метрика 'tiktok_attempt' уже была добавлена в начале.
     
+    # Проверка на 3 срыва
+    try:
+        from stats.user_stats import UserStats
+        stats = UserStats(user_id)
+        if stats.data is None:
+            stats.data = await stats._load_stats()
+            
+        slips_count = await stats.increment_slip()
+        
+        if slips_count == 3:
+            await asyncio.sleep(0.5)
+            await callback.message.answer("Это уже третий раз за сегодня.")
+            
+    except Exception as e:
+        logger.error(f"Ошибка проверки срывов: {e}")
+
     await callback.message.answer("🌳", reply_markup=get_main_keyboard())
     await callback.answer()
-
 
     
 @dp.callback_query(F.data == "stats")
@@ -686,6 +714,7 @@ async def callback_tree_progress(callback: types.CallbackQuery):
     await callback.answer()
 
 
+    
 
 
 
@@ -857,14 +886,26 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
             text = "TikTok остаётся закрытым."
             
     else:
-        # Ветка: Открыть всё равно -> Фиксация
+        # Ветка: Открыть всё равно -> Фиксация + Счетчик срывов
         try:
             from stats.user_stats import update_stats
             await update_stats(user_id, "tiktok_attempt")
-        except Exception:
-            pass
             
-        text = "TikTok открыт.\nМы просто зафиксировали этот момент."
+            # Проверка на 3 срыва
+            from stats.user_stats import UserStats
+            stats = UserStats(user_id)
+            if stats.data is None:
+                stats.data = await stats._load_stats()
+            
+            slips_count = await stats.increment_slip()
+            warning_message = ""
+            if slips_count == 3:
+                warning_message = "\n\nЭто уже третий раз за сегодня."
+
+        except Exception:
+            warning_message = ""
+            
+        text = "TikTok открыт.\nМы просто зафиксировали этот момент." + warning_message
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="В меню", callback_data="back_to_menu")]
@@ -872,7 +913,6 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
     
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
-
 
 
 

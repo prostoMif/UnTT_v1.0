@@ -1,0 +1,40 @@
+{
+  "user_id": 5782224611,
+  "created_at": "2026-02-09T09:07:53.163225+03:00",
+  "events": {
+    "quick_pause": [],
+    "sos": [],
+    "daily_practice": [],
+    "tree_growth": [],
+    "tiktok_attempt": [
+      {
+        "timestamp": "2026-02-09T09:07:58.395278+03:00",
+        "date": "2026-02-09"
+      },
+      {
+        "timestamp": "2026-02-09T09:34:59.451195+03:00",
+        "date": "2026-02-09"
+      }
+    ],
+    "conscious_stop": [
+      {
+        "timestamp": "2026-02-09T09:08:07.736792+03:00",
+        "date": "2026-02-09"
+      }
+    ]
+  },
+  "streaks": {
+    "current": 1,
+    "best": 1,
+    "last_active_date": "2026-02-09"
+  },
+  "summary": {
+    "total_events": 3,
+    "total_pauses": 0,
+    "total_sos": 0,
+    "total_practices": 0,
+    "total_tree_growth": 0,
+    "active_days": 1
+  },
+  "updated_at": "2026-02-09T09:34:59.451222+03:00"
+}
