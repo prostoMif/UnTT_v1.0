@@ -496,7 +496,7 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
         "Дерево отмечает этот выбор."
     )
     
-    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+    await callback.message.answer( reply_markup=get_main_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("qp_time_"))
@@ -526,7 +526,7 @@ async def callback_quick_pause_time(callback: types.CallbackQuery):
         except Exception as e:
             logger.error(f"Ошибка обновления прогресса: {e}")
             
-        await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+        await callback.message.answer( reply_markup=get_main_keyboard())
         await callback.answer()
         
     else:
@@ -564,7 +564,7 @@ async def callback_quick_pause_timer_close(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка обновления прогресса: {e}")
 
-    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+    await callback.message.answer( reply_markup=get_main_keyboard())
     await callback.answer()
 
 
@@ -597,7 +597,7 @@ async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка проверки срывов: {e}")
 
-    await callback.message.answer("🌳", reply_markup=get_main_keyboard())
+    await callback.message.answer( reply_markup=get_main_keyboard())
     await callback.answer()
 
     
