@@ -78,6 +78,8 @@ dp = Dispatcher(storage=storage)
 active_timers = {}
 
 
+
+
 def get_main_keyboard() -> InlineKeyboardMarkup:
     """Создание главного меню с кнопками"""
     keyboard = [
@@ -150,6 +152,104 @@ async def get_user_preference(user_id: int) -> str:
             return None
     return None
 
+# --- Вспомогательные функции для доступа и оплаты ---
+
+async def get_user_status(user_id: int) -> dict:
+    """
+    Загружает статус пользователя (оплачено ли, начался ли триал).
+    Храним в user_preferences.json для простоты.
+    """
+    file_path = "data/user_preferences.json"
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                user_data = data.get(str(user_id), {})
+                return {
+                    "is_paid": user_data.get("is_paid", False),
+                    "trial_started": user_data.get("trial_started", False),
+                    "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False)
+                }
+        except Exception:
+            pass
+    return {"is_paid": False, "trial_started": False, "payment_screen_shown_day5": False}
+
+async def update_user_status(user_id: int, key: str, value):
+    """Обновляет конкретное поле статуса."""
+    file_path = "data/user_preferences.json"
+    data = {}
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+    
+    if str(user_id) not in data:
+        data[str(user_id)] = {}
+    
+    data[str(user_id)][key] = value
+    
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+async def check_access(user_id: int) -> bool:
+    """
+    Проверяет, есть ли доступ к боту.
+    Если прошло 5 дней и не оплачено -> False.
+    """
+    status = await get_user_status(user_id)
+    if status["is_paid"]:
+        return True
+    
+    # Проверяем количество дней в дереве
+    try:
+        from tree_progress.tree import TreeProgress
+        tree = TreeProgress(user_id)
+        if tree.load():
+            if tree.total_days >= 5:
+                return False # Доступ закрыт
+    except Exception:
+        pass
+        
+    return True
+
+async def process_payment_placeholder(user_id: int):
+    """
+    ЗАГЛУШКА ДЛЯ ОПЛАТЫ.
+    СЮДА НУЖНО ПОДКЛЮЧИТЬ ПЛАТЕЖНУЮ СИСТЕМУ (ЮKassa, Сбербанк и т.д.).
+    """
+    # TODO: Здесь должен быть вызов API платежного шлюза
+    logger.info(f"Пользователь {user_id} инициировал оплату.")
+    # Для теста сразу ставим оплачено
+    # await update_user_status(user_id, "is_paid", True)
+    pass
+
+async def show_payment_screen(user_id: int, message_obj: types.Message = None, callback_obj: types.CallbackQuery = None):
+    """Показывает экран оплаты."""
+    text = (
+        "Ты прошёл 5 дней с unTT.\n\n"
+        "За это время:\n"
+        f"дерево сейчас — росток.\n\n" # Можно подтянуть реальные данные из TreeProgress
+        "Если хочешь пройти весь 30‑дневный курс\n"
+        "и продолжить растить дерево,\n"
+        "можно разблокировать оставшиеся 25 дней за 149 рублей.\n"
+        "Разово, без подписки."
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Разблокировать 25 дней — 149 ₽", callback_data="pay_unlock")]
+    ])
+    
+    if message_obj:
+        await message_obj.answer(text, reply_markup=keyboard)
+    elif callback_obj:
+        await callback_obj.message.edit_text(text, reply_markup=keyboard)
+
+# --- Состояния для новой регистрации ---
+class RegStates(StatesGroup):
+    waiting_answer = State()
+
 
 @dp.message(Command("unstart"))
 async def cmd_unstart(message: types.Message):
@@ -196,23 +296,153 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
     """Обработка команды /start"""
     user_id = message.from_user.id
     
-    # Если нужна проверка на регистрацию (файл users.py не показан, но логика сохраняется):
-    if await is_user_registered(user_id): 
+    # Проверка доступа (если 5 дней прошло и не оплачено)
+    if await is_user_registered(user_id):
+        has_access = await check_access(user_id)
+        if not has_access:
+            # Показываем экран оплаты вместо меню
+            await show_payment_screen(user_id, message_obj=message)
+            return
+        
         await message.answer("С возвращением!", reply_markup=get_main_keyboard())
         return
 
-    # Шаг 1: Первое сообщение
+    # Шаг 1: Первое сообщение (Коротко, без денег)
     await message.answer(
         "UnTT.\n"
         "Этот бот помогает замечать моменты перед TikTok.\n"
         "Ты решаешь, что делать дальше.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="Начать", callback_data="onboarding_start"),
+                InlineKeyboardButton(text="Начать", callback_data="reg_intro_start"),
                 InlineKeyboardButton(text="Как это работает", callback_data="onboarding_info")
             ]
         ])
     )
+
+# Хэндлер для кнопки "Начать" -> Показываем расширенный интро
+@dp.callback_query(F.data == "reg_intro_start")
+async def callback_reg_intro(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "Сейчас мы настроим unTT под тебя.\n"
+        "Когда рука тянется к TikTok,\n"
+        "ты сначала заходишь сюда.\n"
+        "unTT задаёт несколько коротких вопросов и отмечает твой выбор."
+    )
+    await asyncio.sleep(0.5)
+    
+    # Сразу задаем вопрос
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Перед сном", callback_data="reg_ans_sleep"),
+            InlineKeyboardButton(text="Вместо учёбы / работы", callback_data="reg_ans_work")
+        ],
+        [
+            InlineKeyboardButton(text="Когда “на 5 минут” → на час", callback_data="reg_ans_5min"),
+            InlineKeyboardButton(text="Вообще везде", callback_data="reg_ans_everywhere")
+        ]
+    ])
+    
+    await callback.message.answer(
+        "Где чаще всего TikTok забирает время?",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+# Хэндлер ответов на регистрацию
+@dp.callback_query(F.data.startswith("reg_ans_"))
+async def callback_reg_answer(callback: types.CallbackQuery):
+    """Обработка ответа и показ меню"""
+    # Сохраняем предпочтение
+    await save_user_preference(callback.from_user.id, callback.data)
+    
+    # Помечаем, что пользователь зарегистрирован (если нужно в is_user_registered)
+    # Если is_user_registered просто проверяет файл предпочтений, то всё ОК.
+    
+    await callback.message.edit_text(
+        "Запомнил.\n"
+        "Буду учитывать это в напоминаниях."
+    )
+    
+    await asyncio.sleep(1)
+    
+    await callback.message.answer(
+        "Ты здесь.\n"
+        "Когда соберёшься открыть TikTok, нажми кнопку ниже.\n"
+        "unTT покажет этот момент.",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
+
+# Хэндлер для оплаты (заглушка)
+@dp.callback_query(F.data == "pay_unlock")
+async def callback_pay(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await process_payment_placeholder(user_id)
+    await callback.answer("Платежный шлюз интегрируется...")
+
+# Хэндлер для кнопки "Начать" -> Показываем расширенный интро
+@dp.callback_query(F.data == "reg_intro_start")
+async def callback_reg_intro(callback: types.CallbackQuery):
+    await callback.message.edit_text(
+        "Сейчас мы настроим unTT под тебя.\n"
+        "Когда рука тянется к TikTok,\n"
+        "ты сначала заходишь сюда.\n"
+        "unTT задаёт несколько коротких вопросов и отмечает твой выбор."
+    )
+    await asyncio.sleep(0.5)
+    
+    # Сразу задаем вопрос
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Перед сном", callback_data="reg_ans_sleep"),
+            InlineKeyboardButton(text="Вместо учёбы / работы", callback_data="reg_ans_work")
+        ],
+        [
+            InlineKeyboardButton(text="Когда “на 5 минут” → на час", callback_data="reg_ans_5min"),
+            InlineKeyboardButton(text="Вообще везде", callback_data="reg_ans_everywhere")
+        ]
+    ])
+    
+    await callback.message.answer(
+        "Где чаще всего TikTok забирает время?",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+# Хэндлер ответов на регистрацию
+@dp.callback_query(F.data.startswith("reg_ans_"))
+async def callback_reg_answer(callback: types.CallbackQuery):
+    """Обработка ответа и показ меню"""
+    # Сохраняем предпочтение
+    await save_user_preference(callback.from_user.id, callback.data)
+    
+    # Помечаем, что пользователь зарегистрирован (если нужно в is_user_registered)
+    # Если is_user_registered просто проверяет файл предпочтений, то всё ОК.
+    
+    await callback.message.edit_text(
+        "Запомнил.\n"
+        "Буду учитывать это в напоминаниях."
+    )
+    
+    await asyncio.sleep(1)
+    
+    await callback.message.answer(
+        "Ты здесь.\n"
+        "Когда соберёшься открыть TikTok, нажми кнопку ниже.\n"
+        "unTT покажет этот момент.",
+        reply_markup=get_main_keyboard()
+    )
+    await callback.answer()
+
+# Хэндлер для оплаты (заглушка)
+@dp.callback_query(F.data == "pay_unlock")
+async def callback_pay(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    await process_payment_placeholder(user_id)
+    await callback.answer("Платежный шлюз интегрируется...")
+
+
 
 # Хэндлер для кнопки "Как это работает" (Шаг 3)
 @dp.callback_query(F.data == "onboarding_info")
@@ -242,14 +472,14 @@ async def callback_onboarding_next(callback: types.CallbackQuery):
             ],
             [
                 InlineKeyboardButton(text="Вечером, когда один", callback_data="reg_evening"),
-                InlineKeyboardButton(text="Пропустить", callback_data="reg_skip")
+                InlineKeyboardButton(text="Вообще везде", callback_data="reg_every")
             ]
         ])
     )
     await callback.answer()
 
 # Хэндлер завершения мини-регистрации (Шаг 4 -> Шаг 2)
-@dp.callback_query(F.data.in_(["reg_sleep", "reg_day", "reg_evening", "reg_skip"]))
+@dp.callback_query(F.data.in_(["reg_sleep", "reg_day", "reg_evening", "reg_every"]))
 async def callback_finish_onboarding(callback: types.CallbackQuery):
     """Сохраняет выбор (опционально) и показывает главное меню"""
     # Здесь можно сохранить callback_data в БД, если нужно
@@ -303,14 +533,14 @@ async def cmd_help(message: types.Message) -> None:
         "• /help - Эта справка\n"
         "• /cancel - Отмена текущего действия\n\n"
         "Функции кнопок:\n"
-        "• ⏸️ <b>Быстрая пауза</b> - Чек-ин перед TikTok\n"
-        "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
+        "• ⏸️ <b>Я иду в TikTok</b> - Пауза перед TikTok\n"
+        # "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
         "• 🆘 <b>SOS</b> - Экстренная помощь\n\n"
-        "📚 <b>Дневная практика включает:</b>\n"
-        "• Рефлексию дня\n"
-        "• Осознанную практику (из 52 вариантов)\n"
-        "• Обновляется каждый день в 7:00 МСК\n"
-        "• Награда XP за выполнение"
+        # "📚 <b>Дневная практика включает:</b>\n"
+        # "• Рефлексию дня\n"
+        # "• Осознанную практику (из 52 вариантов)\n"
+        # "• Обновляется каждый день в 7:00 МСК\n"
+        # "• Награда XP за выполнение"
     )
     await message.answer(help_text, parse_mode='HTML')
 
@@ -345,6 +575,14 @@ async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
 @dp.callback_query(F.data == "quick_pause")
 async def callback_quick_pause_start(callback: types.CallbackQuery, state: FSMContext):
     """Старт сценария: Сообщение 1 и 2"""
+    
+    # --- ПРОВЕРКА ДОСТУПА ---
+    if not await check_access(callback.from_user.id):
+        await show_payment_screen(callback.from_user.id, callback_obj=callback)
+        await callback.answer()
+        return    
+    
+    
     # Учитываем попытку в статистике
     try:
         from stats.user_stats import update_stats
@@ -495,6 +733,36 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
         f"{praise}\n\n"
         "Дерево отмечает этот выбор."
     )
+    
+    # ... внутри callback_quick_pause_finish после update_stats ...
+    
+    # --- ЛОГИКА ТРИАЛА И ОПЛАТЫ ---
+    status = await get_user_status(user_id)
+    
+    # 1. Если это первое осознанное решение (День 1)
+    if not status["trial_started"]:
+        await update_user_status(user_id, "trial_started", True)
+        await asyncio.sleep(1)
+        await callback.message.answer(
+            "С этого момента у тебя идёт 30‑дневный путь.\n"
+            "Первые 5 дней — полный доступ ко всем функциям.\n"
+            "Потом ты сам решишь, хочешь ли продолжать дальше."
+        )
+
+    # 2. Проверка на 5-й день (Показываем предложение оплатить)
+    try:
+        from tree_progress.tree import TreeProgress
+        tree = TreeProgress(user_id)
+        if tree.load():
+            # Если сегодня 5-й день и мы еще не показывали экран оплаты
+            if tree.total_days == 5 and not status["payment_screen_shown_day5"]:
+                await update_user_status(user_id, "payment_screen_shown_day5", True)
+                await asyncio.sleep(1)
+                # Используем callback.message, так как мы внутри callback
+                await show_payment_screen(user_id, callback_obj=callback)
+    except Exception as e:
+        logger.error(f"Ошибка проверки триала: {e}")
+    # --- КОНЕЦ ЛОГИКИ ---    
     
     await callback.message.answer( reply_markup=get_main_keyboard())
     await callback.answer()
@@ -800,6 +1068,14 @@ async def callback_back_to_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "sos")
 async def callback_sos_start(callback: types.CallbackQuery, state: FSMContext):
     """Шаг 1 SOS: Тянет открыть TikTok."""
+        # --- ПРОВЕРКА ДОСТУПА ---
+    if not await check_access(callback.from_user.id):
+        await show_payment_screen(callback.from_user.id, callback_obj=callback)
+        await callback.answer()
+        return
+    # -----------------------
+
+    
     await state.set_state(SosStates.waiting_priority)
     
     text = "Тянет открыть TikTok.\n\nЧто сейчас важнее этого?"
