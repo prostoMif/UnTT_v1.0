@@ -215,16 +215,21 @@ async def check_access(user_id: int) -> bool:
         
     return True
 
-async def process_payment_placeholder(user_id: int):
+async def process_payment_placeholder(user_id: int) -> bool:
     """
     ЗАГЛУШКА ДЛЯ ОПЛАТЫ.
-    СЮДА НУЖНО ПОДКЛЮЧИТЬ ПЛАТЕЖНУЮ СИСТЕМУ (ЮKassa, Сбербанк и т.д.).
+    В реальном проекте здесь должен быть вызов API платежного шлюза (ЮKassa и т.д.).
     """
-    # TODO: Здесь должен быть вызов API платежного шлюза
+    # TODO: Интеграция с платежной системой.
+    # Пример: invoice_url = await yookassa.create_invoice(...)
+    # await bot.send_message(user_id, f"Оплатите по ссылке: {invoice_url}")
+    
     logger.info(f"Пользователь {user_id} инициировал оплату.")
-    # Для теста сразу ставим оплачено
-    # await update_user_status(user_id, "is_paid", True)
-    pass
+    
+    # --- СИМУЛЯЦИЯ УСПЕШНОЙ ОПЛАТЫ ДЛЯ ТЕСТА ---
+    # В реальном боте这段 код нужно удалить и возвращать True только после вебхука от платежки
+    await asyncio.sleep(1) # Имитация задержки сети
+    return True 
 
 async def show_payment_screen(user_id: int, message_obj: types.Message = None, callback_obj: types.CallbackQuery = None):
     """Показывает экран оплаты."""
@@ -374,12 +379,43 @@ async def callback_reg_answer(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# Хэндлер для оплаты (заглушка)
 @dp.callback_query(F.data == "pay_unlock")
 async def callback_pay(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    await process_payment_placeholder(user_id)
-    await callback.answer("Платежный шлюз интегрируется...")
+    
+    # Проверяем, не оплатил ли уже
+    status = await get_user_status(user_id)
+    if status["is_paid"]:
+        await callback.answer("У вас уже есть полный доступ!")
+        return
+
+    # Показываем сообщение об ожидании
+    await callback.answer("Обрабатываем запрос...")
+    
+    # Вызываем функцию оплаты
+    payment_success = await process_payment_placeholder(user_id)
+    
+    if payment_success:
+        # Если оплата прошла (симуляция успешна), обновляем статус
+        await update_user_status(user_id, "is_paid", True)
+        
+        try:
+            await callback.message.edit_text(
+                "✅ Оплата прошла успешно!\n\n"
+                "Доступ к боту разблокирован на 25 дней. "
+                "Можете продолжать пользоваться функциями."
+            )
+            # Отправляем кнопку меню, чтобы пользователь мог продолжить
+            await callback.message.answer("Меню:", reply_markup=get_main_keyboard())
+        except Exception as e:
+            # Если сообщение не редактируется (например, это старое), отправляем новое
+            await callback.message.answer(
+                "✅ Оплата прошла успешно!\n\n"
+                "Доступ к боту разблокирован на 25 дней.",
+                reply_markup=get_main_keyboard()
+            )
+    else:
+        await callback.answer("Произошла ошибка при оплате. Попробуйте позже.")
 
 # Хэндлер для кнопки "Начать" -> Показываем расширенный интро
 @dp.callback_query(F.data == "reg_intro_start")
@@ -410,37 +446,7 @@ async def callback_reg_intro(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# Хэндлер ответов на регистрацию
-@dp.callback_query(F.data.startswith("reg_ans_"))
-async def callback_reg_answer(callback: types.CallbackQuery):
-    """Обработка ответа и показ меню"""
-    # Сохраняем предпочтение
-    await save_user_preference(callback.from_user.id, callback.data)
-    
-    # Помечаем, что пользователь зарегистрирован (если нужно в is_user_registered)
-    # Если is_user_registered просто проверяет файл предпочтений, то всё ОК.
-    
-    await callback.message.edit_text(
-        "Запомнил.\n"
-        "Буду учитывать это в напоминаниях."
-    )
-    
-    await asyncio.sleep(1)
-    
-    await callback.message.answer(
-        "Ты здесь.\n"
-        "Когда соберёшься открыть TikTok, нажми кнопку ниже.\n"
-        "unTT покажет этот момент.",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
 
-# Хэндлер для оплаты (заглушка)
-@dp.callback_query(F.data == "pay_unlock")
-async def callback_pay(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    await process_payment_placeholder(user_id)
-    await callback.answer("Платежный шлюз интегрируется...")
 
 
 
@@ -543,6 +549,32 @@ async def cmd_help(message: types.Message) -> None:
         # "• Награда XP за выполнение"
     )
     await message.answer(help_text, parse_mode='HTML')
+
+@dp.message(Command("tariffs"))
+async def cmd_tariffs(message: types.Message) -> None:
+    """Показывает информацию о тарифах и возможностях бота."""
+    text = (
+        "<b>Тарифы и возможности</b>\n\n"
+        "Telegram-бот помогает пользователю контролировать время использования TikTok, "
+        "отслеживать осознанные заходы в приложение и формировать привычку управления вниманием.\n\n"
+        "<b>Условия доступа:</b>\n"
+        "• Первые 5 дней предоставляются бесплатно.\n"
+        "• После окончания пробного периода подключается доступ на 25 дней стоимостью 149 рублей.\n\n"
+        "<b>Функции бота:</b>\n"
+        "• Кнопка «SOS» (быстрая поддержка в момент желания зайти в TikTok)\n"
+        "• Кнопка «Я иду в TikTok» (осознанная фиксация входа)\n"
+        "• Статистика попыток и активности\n"
+        "• Отслеживание дней использования\n\n"
+        "Стоимость подписки фиксированная — 149 рублей за 25 дней доступа.\n\n"
+        "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Купить за 149 ₽", callback_data="pay_unlock")]
+    ])
+    
+    await message.answer(text, parse_mode='HTML', reply_markup=keyboard)
+
 
 async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
     """Фоновая задача: ждет время и напоминает с кнопкой 'Я закончил'."""
