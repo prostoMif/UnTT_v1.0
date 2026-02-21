@@ -352,7 +352,7 @@ async def callback_reg_answer(callback: types.CallbackQuery):
     """Обработка ответа и показ меню"""
     # Сохраняем предпочтение
     await save_user_preference(callback.from_user.id, callback.data)
-    
+    # аооаоалоаллал
     # Помечаем, что пользователь зарегистрирован (если нужно в is_user_registered)
     # Если is_user_registered просто проверяет файл предпочтений, то всё ОК.
     
