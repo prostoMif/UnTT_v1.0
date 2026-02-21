@@ -376,7 +376,7 @@ async def callback_pay(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
     # Формируем URL возврата (можно просто на бота)
-    return_url = f"https://t.me/{(await bot.get_me()).username}"
+    return_url = f"https://t.me/UnTT1_bot"
     
     await callback.answer("Создаю платеж...")
     
@@ -1117,7 +1117,7 @@ async def callback_back_to_menu(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "sos")
 async def callback_sos_start(callback: types.CallbackQuery, state: FSMContext):
     """Шаг 1 SOS: Тянет открыть TikTok."""
-        # --- ПРОВЕРКА ДОСТУПА ---
+    # --- ПРОВЕРКА ДОСТУПА ---
     if not await check_access(callback.from_user.id):
         await show_payment_screen(callback.from_user.id, callback_obj=callback)
         await callback.answer()
