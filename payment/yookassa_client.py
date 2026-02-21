@@ -20,17 +20,16 @@ else:
     Configuration.account_id = shop_id
     Configuration.secret_key = secret_key
 
-async def create_payment(user_id: int, return_url: str) -> str | None:
+async def create_payment(user_id: int, return_url: str) -> tuple[str | None, str | None]:
     """
-    Создает платеж в ЮKassa и возвращает URL для оплаты.
+    Создает платеж в ЮKassa.
+    Возвращает кортеж: (confirmation_url, payment_id)
     """
-    # Дополнительная проверка внутри функции (на случай, если конфиг сбросился)
     if not Configuration.account_id or not Configuration.secret_key:
         logger.error("Попытка создать платеж без настроенных ключей API.")
-        return None
+        return None, None
 
     try:
-        # ИСПРАВЛЕНИЕ: Запускаем синхронную функцию в отдельном потоке, чтобы не блокировать бота
         payment_dict = {
             "amount": {
                 "value": "149.00",
@@ -45,19 +44,21 @@ async def create_payment(user_id: int, return_url: str) -> str | None:
             "metadata": {
                 "user_id": str(user_id)
             },
-            "test": True
+            "test": True # Сюда потом поставим False для боевого режима
         }
         
         payment = await asyncio.to_thread(Payment.create, payment_dict)
 
         logger.info(f"Платеж создан: {payment.id} для пользователя {user_id}")
         
+        url = None
         if payment.confirmation and payment.confirmation.confirmation_url:
-            return payment.confirmation.confirmation_url
-        return None
+            url = payment.confirmation.confirmation_url
+            
+        return url, payment.id
     except Exception as e:
         logger.error(f"Ошибка создания платежа: {e}")
-        return None
+        return None, None
 
 def calculate_subscription_end_date(months: int = 1) -> str:
     """Вычисляет дату окончания подписки."""

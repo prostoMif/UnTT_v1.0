@@ -39,7 +39,7 @@ from scheduler import MOSCOW_TZ, get_moscow_time
 from stats.user_stats import update_stats, get_stats
 from registration import is_user_registered
 from payment.yookassa_client import create_payment, calculate_subscription_end_date
-
+from yookassa import Payment 
 
 # ... (импорты)
 
@@ -67,6 +67,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+class PaymentStates(StatesGroup):
+    waiting_for_payment = State()
 
 # Токен бота
 load_dotenv()
@@ -346,7 +349,47 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
         ])
     )
 
+# --- АДМИН-КОМАНДЫ ---
 
+# Укажи сюда свой ID (число). Узнать свой ID можно через бота @userinfobot
+ADMIN_ID = 5782224611 
+
+@dp.message(Command("grant"))
+async def cmd_grant_access(message: types.Message):
+    """Выдает подписку пользователю. Использование: /grant user_id [месяцы]"""
+    # Проверка: команду может использовать только админ
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У тебя нет прав для этой команды.")
+        return
+
+    try:
+        # Разбираем аргументы команды: /grant 123456 3
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("⚠️ Формат: /grant <user_id> [месяцы]\nПример: /grant 123456789 1")
+            return
+
+        target_user_id = int(args[1])
+        months = 1 # По умолчанию 1 месяц
+        
+        if len(args) >= 3:
+            months = int(args[2])
+
+        # Активируем подписку
+        end_date = await activate_subscription(target_user_id, months)
+        
+        await message.answer(
+            f"✅ Готово!\n\n"
+            f"Пользователь `{target_user_id}` получил подписку на {months} мес.\n"
+            f"Действует до: {end_date}",
+            parse_mode="Markdown"
+        )
+        
+    except ValueError:
+        await message.answer("❌ Ошибка: ID пользователя и месяцы должны быть числами.")
+    except Exception as e:
+        logger.error(f"Ошибка в команде grant: {e}")
+        await message.answer(f"❌ Произошла ошибка: {e}")
 
 # Хэндлер ответов на регистрацию
 @dp.callback_query(F.data.startswith("reg_ans_"))
@@ -374,18 +417,20 @@ async def callback_reg_answer(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(F.data == "pay_unlock")
-async def callback_pay(callback: types.CallbackQuery):
+async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    
-    # Формируем URL возврата (можно просто на бота)
-    return_url = f"https://t.me/UnTT1_bot"
+    return_url = f"https://t.me/UnTT1_bot" # Твой юзернейм бота
     
     await callback.answer("Создаю платеж...")
     
-    # Создаем платеж через ЮKassa
-    payment_url = await create_payment(user_id, return_url)
+    # Создаем платеж и получаем URL + ID
+    payment_url, payment_id = await create_payment(user_id, return_url)
     
-    if payment_url:
+    if payment_url and payment_id:
+        # Сохраняем ID платежа в память состояния
+        await state.update_data(last_payment_id=payment_id)
+        await state.set_state(PaymentStates.waiting_for_payment)
+        
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить 149 ₽", url=payment_url)],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment_status")]
@@ -398,41 +443,56 @@ async def callback_pay(callback: types.CallbackQuery):
                 reply_markup=keyboard
             )
         except Exception:
-            # Если сообщение старое и не редактируется
             await callback.message.answer(
                 "Для продолжения доступа необходимо оплатить подписку.\n"
                 "После оплаты нажмите кнопку 'Проверить оплату'.",
                 reply_markup=keyboard
             )
     else:
-        await callback.message.answer(
-            "❌ Не удалось создать ссылку на оплату.\n\n"
-            "Возможные причины:\n"
-            "1. Не установлена библиотека (pip install yookassa)\n"
-            "2. Неверные ключи в .env\n"
-            "3. У бота нет @username"
-        )
+        await callback.message.answer("❌ Не удалось создать ссылку на оплату. Проверь логи.")
 # jfgf
 
 @dp.callback_query(F.data == "check_payment_status")
-async def callback_check_payment_status(callback: types.CallbackQuery):
+async def callback_check_payment_status(callback: types.CallbackQuery, state: FSMContext):
     """
-    Временная заглушка для проверки оплаты.
-    В идеале здесь должен быть запрос к API ЮKassa для проверки статуса платежа.
-    Но для простоты пока мы просто проверим, если пользователь "оплатил", дадим доступ.
+    Проверяет статус платежа в ЮKassa.
     """
     user_id = callback.from_user.id
     
-    # TODO: Здесь должен быть реальный запрос к API ЮKassa (Payment.find_one(payment_id))
-    # Для теста раскомментируй строку ниже, чтобы симулировать успешную оплату:
-    # await activate_subscription(user_id)
+    # Получаем сохраненный ID платежа
+    data = await state.get_data()
+    payment_id = data.get("last_payment_id")
     
-    # Для реальной работы через API (пример логики):
-    # payment = Payment.find_one(last_payment_id)
-    # if payment.status == "succeeded":
-    #     await activate_subscription(user_id)
-    
-    await callback.answer("Оплата еще не прошла или мы ожидаем подтверждение от банка.")
+    if not payment_id:
+        await callback.answer("Информация о платеже утеряна. Попробуйте оплатить заново (/start).")
+        return
+
+    await callback.answer("Проверяю статус...")
+
+    try:
+        # Делаем синхронный запрос к API ЮKassa в отдельном потоке
+        payment = await asyncio.to_thread(Payment.find_one, payment_id)
+        
+        if payment.status == "succeeded":
+            # Оплата прошла успешно!
+            await activate_subscription(user_id)
+            await state.clear() # Очищаем состояние
+            
+            await callback.message.edit_text(
+                "✅ Оплата прошла успешно! Подписка активирована.\n\nДобро пожаловать!",
+                reply_markup=get_main_keyboard()
+            )
+        elif payment.status == "pending":
+            await callback.answer("Оплата еще проходит обработку банком. Подождите немного и попробуйте снова.")
+        elif payment.status == "canceled":
+            await callback.answer("Платеж был отменен.")
+        else:
+            logger.info(f"Статус платежа: {payment.status}")
+            await callback.answer(f"Статус платежа: {payment.status}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка проверки оплаты: {e}")
+        await callback.answer("Не удалось проверить статус. Напишите админу.")
 
 # Хэндлер для кнопки "Начать" -> Показываем расширенный интро
 @dp.callback_query(F.data == "reg_intro_start")
