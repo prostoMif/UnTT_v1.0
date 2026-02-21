@@ -33,7 +33,7 @@ from daily_practice import get_next_practice, complete_practice, get_user_practi
 from daily_practice import get_daily_practice
 from tree_progress.tree import TreeProgress
 from daily_practice.schedule import get_user_stats, update_user_stats
-from datetime import datetime
+from datetime import datetime, timedelta
 from scheduler import start_reminder_system, stop_reminder_system
 from scheduler import MOSCOW_TZ, get_moscow_time
 from stats.user_stats import update_stats, get_stats
@@ -226,10 +226,27 @@ async def update_user_status(user_id: int, key: str, value):
 
 
 async def activate_subscription(user_id: int, months: int = 1):
-    """Активирует подписку пользователю."""
-    new_end_date = calculate_subscription_end_date(months=months)
-    await update_user_status(user_id, "subscription_end_date", new_end_date)
-    logger.info(f"Подписка активирована для {user_id} до {new_end_date}")
+    """Активирует или продлевает подписку."""
+    status = await get_user_status(user_id)
+    
+    # Базовая дата — сейчас
+    base_date = datetime.now()
+    
+    # Если подписка уже активна и дата окончания в будущем, продлеваем от неё
+    if status["is_paid"] and status["subscription_end_date"]:
+        try:
+            current_end_date = datetime.fromisoformat(status["subscription_end_date"])
+            if current_end_date > base_date:
+                base_date = current_end_date
+        except ValueError:
+            # Если дата в файле битая, используем текущее время
+            pass
+    
+    # Вычисляем новую дату
+    new_end_date = base_date + timedelta(days=30 * months)
+    
+    await update_user_status(user_id, "subscription_end_date", new_end_date.isoformat())
+    logger.info(f"Подписка для {user_id} обновлена. Новая дата окончания: {new_end_date}")
 
 async def check_access(user_id: int) -> bool:
     """
