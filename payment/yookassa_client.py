@@ -44,7 +44,7 @@ async def create_payment(user_id: int, return_url: str) -> tuple[str | None, str
             "metadata": {
                 "user_id": str(user_id)
             },
-            "test": True # Сюда потом поставим False для боевого режима
+            "test": False # Сюда потом поставим False для боевого режима
         }
         
         payment = await asyncio.to_thread(Payment.create, payment_dict)

@@ -39,7 +39,7 @@ from scheduler import MOSCOW_TZ, get_moscow_time
 from stats.user_stats import update_stats, get_stats
 from registration import is_user_registered
 from payment.yookassa_client import create_payment, calculate_subscription_end_date
-from yookassa import Payment 
+from yookassa import Payment, Configuration 
 
 # ... (импорты)
 
@@ -202,11 +202,20 @@ async def update_user_status(user_id: int, key: str, value):
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                loaded_data = json.load(f)
+                # Проверяем, что загрузился словарь
+                if isinstance(loaded_data, dict):
+                    data = loaded_data
         except Exception:
             pass
     
-    if str(user_id) not in data:
+    # ВАЖНО: Если данные пользователя уже есть, но это строка (от save_user_preference),
+    # мы должны превратить её в словарь, иначе будет ошибка 'str' object does not support item assignment.
+    if str(user_id) in data:
+        if not isinstance(data[str(user_id)], dict):
+            # Если там строка или что-то другое, заменяем на пустой словарь
+            data[str(user_id)] = {}
+    else:
         data[str(user_id)] = {}
     
     data[str(user_id)][key] = value
@@ -214,6 +223,13 @@ async def update_user_status(user_id: int, key: str, value):
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+async def activate_subscription(user_id: int, months: int = 1):
+    """Активирует подписку пользователю."""
+    new_end_date = calculate_subscription_end_date(months=months)
+    await update_user_status(user_id, "subscription_end_date", new_end_date)
+    logger.info(f"Подписка активирована для {user_id} до {new_end_date}")
 
 async def check_access(user_id: int) -> bool:
     """
@@ -274,11 +290,6 @@ async def show_payment_screen(user_id: int, message_obj: types.Message = None, c
 class RegStates(StatesGroup):
     waiting_answer = State()
 
-async def activate_subscription(user_id: int):
-    """Активирует подписку пользователю."""
-    new_end_date = calculate_subscription_end_date(months=1)
-    await update_user_status(user_id, "subscription_end_date", new_end_date)
-    logger.info(f"Подписка активирована для {user_id} до {new_end_date}")
 
 @dp.message(Command("unstart"))
 async def cmd_unstart(message: types.Message):
@@ -468,30 +479,31 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
         return
 
     await callback.answer("Проверяю статус...")
-    
-    logger.info(f"Проверка платежа ID: {payment_id}, Тип: {type(payment_id)}")
+
+    # Вспомогательная синхронная функция для запуска в потоке
+    # Явно передаем конфигурацию, чтобы избежать ошибок потоков
+    def _find_one_wrapper(p_id):
+        Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
+        Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
+        return Payment.find_one(p_id)
 
     try:
-        # Делаем синхронный запрос к API ЮKassa в отдельном потоке
-        payment = await asyncio.to_thread(Payment.find_one, payment_id)
+        # Запускаем обертку в отдельном потоке
+        payment = await asyncio.to_thread(_find_one_wrapper, payment_id)
         
-        # ДОБАВЛЕНО: Логируем тип того, что вернула библиотека
         logger.info(f"Ответ от ЮKassa: {payment}, Тип: {type(payment)}")
 
-        # Проверяем, что payment - это объект, а не строка или None
         if not payment:
             await callback.answer("Не удалось получить информацию о платеже (пустой ответ).")
             return
 
         if not hasattr(payment, 'status'):
-             # Если вернулась строка или словарь вместо объекта
              await callback.answer(f"Неожиданный формат ответа от банка. Тип: {type(payment)}")
              return
 
         if payment.status == "succeeded":
-            # Оплата прошла успешно!
             await activate_subscription(user_id)
-            await state.clear() # Очищаем состояние
+            await state.clear()
             
             await callback.message.edit_text(
                 "✅ Оплата прошла успешно! Подписка активирована.\n\nДобро пожаловать!",
@@ -507,7 +519,6 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
             
     except Exception as e:
         logger.error(f"Ошибка проверки оплаты: {e}")
-        # Выводим подробности ошибки пользователю (для отладки)
         await callback.answer(f"Ошибка проверки: {str(e)}. Попробуйте позже.")
 
 # Хэндлер для кнопки "Начать" -> Показываем расширенный интро
@@ -648,6 +659,9 @@ async def cmd_help(message: types.Message) -> None:
 @dp.message(Command("tariffs"))
 async def cmd_tariffs(message: types.Message) -> None:
     """Показывает информацию о тарифах и возможностях бота."""
+    user_id = message.from_user.id
+    status = await get_user_status(user_id)
+
     text = (
         "<b>Тарифы и возможности</b>\n\n"
         "Telegram-бот помогает пользователю контролировать время использования TikTok, "
@@ -663,9 +677,65 @@ async def cmd_tariffs(message: types.Message) -> None:
         "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n\n"
         "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
     )
+
+    # Логика отображения статуса подписки
+    if status["is_paid"] and status["subscription_end_date"]:
+        try:
+            # Форматируем дату для красивого вывода (например, 21.02.2026)
+            end_date = datetime.fromisoformat(status["subscription_end_date"])
+            date_str = end_date.strftime("%d.%m.%Y")
+        except ValueError:
+            # Если формат даты сломался, выводим как есть
+            date_str = status["subscription_end_date"]
+        
+        text += f"\n\n✅ <b>Твоя подписка активна до: {date_str}</b>"
+        button_text = "Продлить подписку"
+    else:
+        button_text = "Купить за 149 ₽"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Купить за 149 ₽", callback_data="pay_unlock")]
+        [InlineKeyboardButton(text=button_text, callback_data="pay_unlock")]
+    ])
+    
+    await message.answer(text, parse_mode='HTML', reply_markup=keyboard)@dp.message(Command("tariffs"))
+async def cmd_tariffs(message: types.Message) -> None:
+    """Показывает информацию о тарифах и возможностях бота."""
+    user_id = message.from_user.id
+    status = await get_user_status(user_id)
+
+    text = (
+        "<b>Тарифы и возможности</b>\n\n"
+        "Telegram-бот помогает пользователю контролировать время использования TikTok, "
+        "отслеживать осознанные заходы в приложение и формировать привычку управления вниманием.\n\n"
+        "<b>Условия доступа:</b>\n"
+        "• Первые 5 дней предоставляются бесплатно.\n"
+        "• После окончания пробного периода подключается доступ на 30 дней стоимостью 149 рублей.\n\n"
+        "<b>Функции бота:</b>\n"
+        "• Кнопка «SOS» (быстрая поддержка в момент желания зайти в TikTok)\n"
+        "• Кнопка «Я иду в TikTok» (осознанная фиксация входа)\n"
+        "• Статистика попыток и активности\n"
+        "• Отслеживание дней использования\n\n"
+        "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n\n"
+        "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
+    )
+
+    # Логика отображения статуса подписки
+    if status["is_paid"] and status["subscription_end_date"]:
+        try:
+            # Форматируем дату для красивого вывода (например, 21.02.2026)
+            end_date = datetime.fromisoformat(status["subscription_end_date"])
+            date_str = end_date.strftime("%d.%m.%Y")
+        except ValueError:
+            # Если формат даты сломался, выводим как есть
+            date_str = status["subscription_end_date"]
+        
+        text += f"\n\n✅ <b>Твоя подписка активна до: {date_str}</b>"
+        button_text = "Продлить подписку"
+    else:
+        button_text = "Купить за 149 ₽"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=button_text, callback_data="pay_unlock")]
     ])
     
     await message.answer(text, parse_mode='HTML', reply_markup=keyboard)

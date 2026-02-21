@@ -14,27 +14,35 @@
       {
         "timestamp": "2026-02-09T09:34:59.451195+03:00",
         "date": "2026-02-09"
+      },
+      {
+        "timestamp": "2026-02-21T13:32:33.074517+03:00",
+        "date": "2026-02-21"
       }
     ],
     "conscious_stop": [
       {
         "timestamp": "2026-02-09T09:08:07.736792+03:00",
         "date": "2026-02-09"
+      },
+      {
+        "timestamp": "2026-02-21T13:32:52.689648+03:00",
+        "date": "2026-02-21"
       }
     ]
   },
   "streaks": {
     "current": 1,
     "best": 1,
-    "last_active_date": "2026-02-09"
+    "last_active_date": "2026-02-21"
   },
   "summary": {
-    "total_events": 3,
+    "total_events": 5,
     "total_pauses": 0,
     "total_sos": 0,
     "total_practices": 0,
     "total_tree_growth": 0,
-    "active_days": 1
+    "active_days": 2
   },
-  "updated_at": "2026-02-09T09:34:59.451222+03:00"
+  "updated_at": "2026-02-21T13:32:52.689663+03:00"
 }
