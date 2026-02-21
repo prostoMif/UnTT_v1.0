@@ -3,12 +3,14 @@ import logging
 import asyncio
 import json
 
+from dotenv import load_dotenv
+load_dotenv() 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from dotenv import load_dotenv
+
 import re
 
 

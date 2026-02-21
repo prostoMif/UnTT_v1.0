@@ -1,4 +1,5 @@
 import os
+import asyncio  # ДОБАВИТЬ ИМПОРТ
 import yookassa
 from yookassa import Configuration, Payment
 import logging
@@ -15,7 +16,8 @@ async def create_payment(user_id: int, return_url: str) -> str | None:
     Создает платеж в ЮKassa и возвращает URL для оплаты.
     """
     try:
-        payment = Payment.create({
+        # ИСПРАВЛЕНИЕ: Запускаем синхронную функцию в отдельном потоке, чтобы не блокировать бота
+        payment_dict = {
             "amount": {
                 "value": "149.00",
                 "currency": "RUB"
@@ -30,10 +32,12 @@ async def create_payment(user_id: int, return_url: str) -> str | None:
                 "user_id": str(user_id)
             },
             "test": True
-        })
+        }
+        
+        payment = await asyncio.to_thread(Payment.create, payment_dict)
 
         logger.info(f"Платеж создан: {payment.id} для пользователя {user_id}")
-        # Получаем confirmation_url
+        
         if payment.confirmation and payment.confirmation.confirmation_url:
             return payment.confirmation.confirmation_url
         return None
