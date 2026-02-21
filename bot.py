@@ -11,6 +11,8 @@ from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 import re
 
+
+
 # Импорт функций из модулей
 from daily_check.check import quick_pause, daily_check
 from sos.sos import handle_sos
@@ -30,12 +32,11 @@ from daily_practice import get_daily_practice
 from tree_progress.tree import TreeProgress
 from daily_practice.schedule import get_user_stats, update_user_stats
 from datetime import datetime
-from daily_check.check import save_daily_data
 from scheduler import start_reminder_system, stop_reminder_system
 from scheduler import MOSCOW_TZ, get_moscow_time
 from stats.user_stats import update_stats, get_stats
 from registration import is_user_registered
-
+from payment.yookassa_client import create_payment, calculate_subscription_end_date
 
 
 # ... (импорты)
@@ -76,6 +77,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=storage)
 
 active_timers = {}
+
 
 
 
@@ -154,10 +156,11 @@ async def get_user_preference(user_id: int) -> str:
 
 # --- Вспомогательные функции для доступа и оплаты ---
 
+
+
 async def get_user_status(user_id: int) -> dict:
     """
-    Загружает статус пользователя (оплачено ли, начался ли триал).
-    Храним в user_preferences.json для простоты.
+    Загружает статус пользователя.
     """
     file_path = "data/user_preferences.json"
     if os.path.exists(file_path):
@@ -165,14 +168,27 @@ async def get_user_status(user_id: int) -> dict:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 user_data = data.get(str(user_id), {})
+                
+                # Проверяем, активна ли подписка по дате
+                sub_end_str = user_data.get("subscription_end_date")
+                is_paid = False
+                if sub_end_str:
+                    try:
+                        sub_end = datetime.fromisoformat(sub_end_str)
+                        if sub_end > datetime.now():
+                            is_paid = True
+                    except ValueError:
+                        pass
+
                 return {
-                    "is_paid": user_data.get("is_paid", False),
+                    "is_paid": is_paid,
+                    "subscription_end_date": sub_end_str,
                     "trial_started": user_data.get("trial_started", False),
                     "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False)
                 }
         except Exception:
             pass
-    return {"is_paid": False, "trial_started": False, "payment_screen_shown_day5": False}
+    return {"is_paid": False, "subscription_end_date": None, "trial_started": False, "payment_screen_shown_day5": False}
 
 async def update_user_status(user_id: int, key: str, value):
     """Обновляет конкретное поле статуса."""
@@ -197,39 +213,31 @@ async def update_user_status(user_id: int, key: str, value):
 async def check_access(user_id: int) -> bool:
     """
     Проверяет, есть ли доступ к боту.
-    Если прошло 5 дней и не оплачено -> False.
+    1. Если есть активная платная подписка -> True.
+    2. Если подписки нет, но дней в дереве < 5 -> True (Триал).
+    3. Иначе -> False.
     """
     status = await get_user_status(user_id)
+    
+    # Если платная подписка активна
     if status["is_paid"]:
         return True
     
-    # Проверяем количество дней в дереве
+    # Если подписки нет, проверяем триал по дереву
     try:
         from tree_progress.tree import TreeProgress
         tree = TreeProgress(user_id)
         if tree.load():
-            if tree.total_days >= 5:
-                return False # Доступ закрыт
+            if tree.total_days < 5:
+                return True
+            else:
+                return False # Триал кончился, не оплачено
     except Exception:
         pass
         
-    return True
+    return False
 
-async def process_payment_placeholder(user_id: int) -> bool:
-    """
-    ЗАГЛУШКА ДЛЯ ОПЛАТЫ.
-    В реальном проекте здесь должен быть вызов API платежного шлюза (ЮKassa и т.д.).
-    """
-    # TODO: Интеграция с платежной системой.
-    # Пример: invoice_url = await yookassa.create_invoice(...)
-    # await bot.send_message(user_id, f"Оплатите по ссылке: {invoice_url}")
-    
-    logger.info(f"Пользователь {user_id} инициировал оплату.")
-    
-    # --- СИМУЛЯЦИЯ УСПЕШНОЙ ОПЛАТЫ ДЛЯ ТЕСТА ---
-    # В реальном боте这段 код нужно удалить и возвращать True только после вебхука от платежки
-    await asyncio.sleep(1) # Имитация задержки сети
-    return True 
+
 
 async def show_payment_screen(user_id: int, message_obj: types.Message = None, callback_obj: types.CallbackQuery = None):
     """Показывает экран оплаты."""
@@ -237,24 +245,35 @@ async def show_payment_screen(user_id: int, message_obj: types.Message = None, c
         "Ты прошёл 5 дней с unTT.\n\n"
         "За это время:\n"
         f"дерево сейчас — росток.\n\n" # Можно подтянуть реальные данные из TreeProgress
-        "Если хочешь пройти весь 30‑дневный курс\n"
-        "и продолжить растить дерево,\n"
-        "можно разблокировать оставшиеся 25 дней за 149 рублей.\n"
-        "Разово, без подписки."
+        "Хочешь продолжить развивать своё дерево?\n"
+        "Доступ к функциям бота будет стоить \n"
+        "30 дней — 149 рублей.\n"
+        "Без автоматической оплаты - \n"
+        "Ты сам выбираешь, пользоваться дальше или нет\n"
+        "Подписку можно отменить в любой момент."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Разблокировать 25 дней — 149 ₽", callback_data="pay_unlock")]
+        [InlineKeyboardButton(text="Разблокировать 30 дней — 149 ₽", callback_data="pay_unlock")]
     ])
     
     if message_obj:
-        await message_obj.answer(text, reply_markup=keyboard)
+        await message_obj.answer(text, parse_mode="HTML", reply_markup=keyboard)
     elif callback_obj:
-        await callback_obj.message.edit_text(text, reply_markup=keyboard)
+        try:
+            await callback_obj.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        except Exception:
+            await callback_obj.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
 
 # --- Состояния для новой регистрации ---
 class RegStates(StatesGroup):
     waiting_answer = State()
 
+async def activate_subscription(user_id: int):
+    """Активирует подписку пользователю."""
+    new_end_date = calculate_subscription_end_date(months=1)
+    await update_user_status(user_id, "subscription_end_date", new_end_date)
+    logger.info(f"Подписка активирована для {user_id} до {new_end_date}")
 
 @dp.message(Command("unstart"))
 async def cmd_unstart(message: types.Message):
@@ -325,34 +344,7 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
         ])
     )
 
-# Хэндлер для кнопки "Начать" -> Показываем расширенный интро
-@dp.callback_query(F.data == "reg_intro_start")
-async def callback_reg_intro(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "Сейчас мы настроим unTT под тебя.\n"
-        "Когда рука тянется к TikTok,\n"
-        "ты сначала заходишь сюда.\n"
-        "unTT задаёт несколько коротких вопросов и отмечает твой выбор."
-    )
-    await asyncio.sleep(0.5)
-    
-    # Сразу задаем вопрос
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="Перед сном", callback_data="reg_ans_sleep"),
-            InlineKeyboardButton(text="Вместо учёбы / работы", callback_data="reg_ans_work")
-        ],
-        [
-            InlineKeyboardButton(text="Когда “на 5 минут” → на час", callback_data="reg_ans_5min"),
-            InlineKeyboardButton(text="Вообще везде", callback_data="reg_ans_everywhere")
-        ]
-    ])
-    
-    await callback.message.answer(
-        "Где чаще всего TikTok забирает время?",
-        reply_markup=keyboard
-    )
-    await callback.answer()
+
 
 # Хэндлер ответов на регистрацию
 @dp.callback_query(F.data.startswith("reg_ans_"))
@@ -383,39 +375,55 @@ async def callback_reg_answer(callback: types.CallbackQuery):
 async def callback_pay(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     
-    # Проверяем, не оплатил ли уже
-    status = await get_user_status(user_id)
-    if status["is_paid"]:
-        await callback.answer("У вас уже есть полный доступ!")
-        return
-
-    # Показываем сообщение об ожидании
-    await callback.answer("Обрабатываем запрос...")
+    # Формируем URL возврата (можно просто на бота)
+    return_url = f"https://t.me/{(await bot.get_me()).username}"
     
-    # Вызываем функцию оплаты
-    payment_success = await process_payment_placeholder(user_id)
+    await callback.answer("Создаю платеж...")
     
-    if payment_success:
-        # Если оплата прошла (симуляция успешна), обновляем статус
-        await update_user_status(user_id, "is_paid", True)
+    # Создаем платеж через ЮKassa
+    payment_url = await create_payment(user_id, return_url)
+    
+    if payment_url:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить 149 ₽", url=payment_url)],
+            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment_status")]
+        ])
         
         try:
             await callback.message.edit_text(
-                "✅ Оплата прошла успешно!\n\n"
-                "Доступ к боту разблокирован на 25 дней. "
-                "Можете продолжать пользоваться функциями."
+                "Для продолжения доступа необходимо оплатить подписку.\n"
+                "После оплаты нажмите кнопку 'Проверить оплату'.",
+                reply_markup=keyboard
             )
-            # Отправляем кнопку меню, чтобы пользователь мог продолжить
-            await callback.message.answer("Меню:", reply_markup=get_main_keyboard())
-        except Exception as e:
-            # Если сообщение не редактируется (например, это старое), отправляем новое
+        except Exception:
+            # Если сообщение старое и не редактируется
             await callback.message.answer(
-                "✅ Оплата прошла успешно!\n\n"
-                "Доступ к боту разблокирован на 25 дней.",
-                reply_markup=get_main_keyboard()
+                "Для продолжения доступа необходимо оплатить подписку.\n"
+                "После оплаты нажмите кнопку 'Проверить оплату'.",
+                reply_markup=keyboard
             )
     else:
-        await callback.answer("Произошла ошибка при оплате. Попробуйте позже.")
+        await callback.answer("Не удалось создать платеж. Попробуйте позже.")
+
+@dp.callback_query(F.data == "check_payment_status")
+async def callback_check_payment_status(callback: types.CallbackQuery):
+    """
+    Временная заглушка для проверки оплаты.
+    В идеале здесь должен быть запрос к API ЮKassa для проверки статуса платежа.
+    Но для простоты пока мы просто проверим, если пользователь "оплатил", дадим доступ.
+    """
+    user_id = callback.from_user.id
+    
+    # TODO: Здесь должен быть реальный запрос к API ЮKassa (Payment.find_one(payment_id))
+    # Для теста раскомментируй строку ниже, чтобы симулировать успешную оплату:
+    # await activate_subscription(user_id)
+    
+    # Для реальной работы через API (пример логики):
+    # payment = Payment.find_one(last_payment_id)
+    # if payment.status == "succeeded":
+    #     await activate_subscription(user_id)
+    
+    await callback.answer("Оплата еще не прошла или мы ожидаем подтверждение от банка.")
 
 # Хэндлер для кнопки "Начать" -> Показываем расширенный интро
 @dp.callback_query(F.data == "reg_intro_start")
@@ -538,6 +546,7 @@ async def cmd_help(message: types.Message) -> None:
         "• /start - Главное меню\n"
         "• /help - Эта справка\n"
         "• /cancel - Отмена текущего действия\n\n"
+        "• /tariffs - Информация о тарифах и возможностях\n\n"
         "Функции кнопок:\n"
         "• ⏸️ <b>Я иду в TikTok</b> - Пауза перед TikTok\n"
         # "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
@@ -547,6 +556,7 @@ async def cmd_help(message: types.Message) -> None:
         # "• Осознанную практику (из 52 вариантов)\n"
         # "• Обновляется каждый день в 7:00 МСК\n"
         # "• Награда XP за выполнение"
+        
     )
     await message.answer(help_text, parse_mode='HTML')
 
@@ -559,13 +569,13 @@ async def cmd_tariffs(message: types.Message) -> None:
         "отслеживать осознанные заходы в приложение и формировать привычку управления вниманием.\n\n"
         "<b>Условия доступа:</b>\n"
         "• Первые 5 дней предоставляются бесплатно.\n"
-        "• После окончания пробного периода подключается доступ на 25 дней стоимостью 149 рублей.\n\n"
+        "• После окончания пробного периода подключается доступ на 30 дней стоимостью 149 рублей.\n\n"
         "<b>Функции бота:</b>\n"
         "• Кнопка «SOS» (быстрая поддержка в момент желания зайти в TikTok)\n"
         "• Кнопка «Я иду в TikTok» (осознанная фиксация входа)\n"
         "• Статистика попыток и активности\n"
         "• Отслеживание дней использования\n\n"
-        "Стоимость подписки фиксированная — 149 рублей за 25 дней доступа.\n\n"
+        "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n\n"
         "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
     )
     
@@ -706,7 +716,7 @@ async def process_time_input(message: types.Message, state: FSMContext):
     
     # Сбрасываем состояние, чтобы не ловить лишние сообщения, 
     # но данные сохраняем в state через update_data выше
-    await state.clear()
+
 
 @dp.callback_query(F.data == "qp_finish")
 async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMContext):
@@ -796,7 +806,7 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
         logger.error(f"Ошибка проверки триала: {e}")
     # --- КОНЕЦ ЛОГИКИ ---    
     
-    await callback.message.answer( reply_markup=get_main_keyboard())
+    await callback.message.answer("Возвращаемся в меню...", reply_markup=get_main_keyboard())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("qp_time_"))
@@ -864,7 +874,7 @@ async def callback_quick_pause_timer_close(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка обновления прогресса: {e}")
 
-    await callback.message.answer( reply_markup=get_main_keyboard())
+    await callback.message.answer("Возвращаемся в меню...", reply_markup=get_main_keyboard())
     await callback.answer()
 
 
@@ -897,7 +907,7 @@ async def callback_quick_pause_timer_stay(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка проверки срывов: {e}")
 
-    await callback.message.answer( reply_markup=get_main_keyboard())
+    await callback.message.answer("Возвращаемся в меню...", reply_markup=get_main_keyboard())
     await callback.answer()
 
     
@@ -1229,6 +1239,7 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
 async def main() -> None:
     """Запуск бота"""
     print("Бот запускается...")
+    await start_reminder_system(bot)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
