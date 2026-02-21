@@ -468,11 +468,26 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
         return
 
     await callback.answer("Проверяю статус...")
+    
+    logger.info(f"Проверка платежа ID: {payment_id}, Тип: {type(payment_id)}")
 
     try:
         # Делаем синхронный запрос к API ЮKassa в отдельном потоке
         payment = await asyncio.to_thread(Payment.find_one, payment_id)
         
+        # ДОБАВЛЕНО: Логируем тип того, что вернула библиотека
+        logger.info(f"Ответ от ЮKassa: {payment}, Тип: {type(payment)}")
+
+        # Проверяем, что payment - это объект, а не строка или None
+        if not payment:
+            await callback.answer("Не удалось получить информацию о платеже (пустой ответ).")
+            return
+
+        if not hasattr(payment, 'status'):
+             # Если вернулась строка или словарь вместо объекта
+             await callback.answer(f"Неожиданный формат ответа от банка. Тип: {type(payment)}")
+             return
+
         if payment.status == "succeeded":
             # Оплата прошла успешно!
             await activate_subscription(user_id)
@@ -492,7 +507,8 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
             
     except Exception as e:
         logger.error(f"Ошибка проверки оплаты: {e}")
-        await callback.answer("Не удалось проверить статус. Напишите админу.")
+        # Выводим подробности ошибки пользователю (для отладки)
+        await callback.answer(f"Ошибка проверки: {str(e)}. Попробуйте позже.")
 
 # Хэндлер для кнопки "Начать" -> Показываем расширенный интро
 @dp.callback_query(F.data == "reg_intro_start")
