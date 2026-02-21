@@ -410,6 +410,7 @@ async def callback_pay(callback: types.CallbackQuery):
             "2. Неверные ключи в .env\n"
             "3. У бота нет @username"
         )
+# jfgf
 
 @dp.callback_query(F.data == "check_payment_status")
 async def callback_check_payment_status(callback: types.CallbackQuery):
