@@ -403,7 +403,13 @@ async def callback_pay(callback: types.CallbackQuery):
                 reply_markup=keyboard
             )
     else:
-        await callback.answer("Не удалось создать платеж. Попробуйте позже.")
+        await callback.message.answer(
+            "❌ Не удалось создать ссылку на оплату.\n\n"
+            "Возможные причины:\n"
+            "1. Не установлена библиотека (pip install yookassa)\n"
+            "2. Неверные ключи в .env\n"
+            "3. У бота нет @username"
+        )
 
 @dp.callback_query(F.data == "check_payment_status")
 async def callback_check_payment_status(callback: types.CallbackQuery):
