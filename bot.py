@@ -97,7 +97,8 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             # InlineKeyboardButton(text=" Дерево прогресса", callback_data="tree_progress"),
-            InlineKeyboardButton(text=" Статистика", callback_data="stats")
+            InlineKeyboardButton(text=" Статистика", callback_data="stats"),
+            InlineKeyboardButton(text=" Подписка", callback_data="manage_subscription")
         ]
         
     ]
@@ -122,6 +123,101 @@ def parse_duration(text: str) -> int:
         return int(float(match_min.group(1)))
         
     return None
+
+async def process_auto_renewals(bot: Bot):
+    """
+    Фоновая задача: проверяет пользователей с автопродлением и списывает средства.
+    """
+    logger.info("Запуск процесса автопродления подписок...")
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла пользователей: {e}")
+        return
+
+    now = datetime.now()
+    # Проверяем подписки, которые заканчиваются сегодня или завтра
+    # (Окно в 2 дня, чтобы не пропустить из-за разницы во времени выполнения скрипта)
+    time_threshold = now + timedelta(days=2) 
+
+    for user_id_str, user_data in data.items():
+        try:
+            # 1. Проверяем флаг автопродления
+            if not user_data.get("auto_renewal"):
+                continue
+
+            # 2. Проверяем наличие привязанной карты
+            payment_method_id = user_data.get("payment_method_id")
+            if not payment_method_id:
+                logger.warning(f"User {user_id_str}: Автопродление включено, но карта не привязана.")
+                continue
+
+            # 3. Проверяем дату окончания
+            sub_end_str = user_data.get("subscription_end_date")
+            if not sub_end_str:
+                continue
+            
+            sub_end_date = datetime.fromisoformat(sub_end_str)
+            
+            # Если подписка кончается больше чем через 2 дня, пропускаем
+            if sub_end_date > time_threshold:
+                continue
+            
+            # Если подписка уже кончилась давно (больше 5 дней назад), тоже пропускаем, 
+            # чтобы не спамить старыми пользователями
+            if sub_end_date < now - timedelta(days=5):
+                continue
+
+            # --- ПОПЫТКА СПИСАНИЯ ---
+            logger.info(f"Попытка автопродления для пользователя {user_id_str}...")
+            
+            # Импортируем функцию клиента
+            from payment.yookassa_client import charge_saved_card
+            
+            success, error = await charge_saved_card(payment_method_id)
+            user_id = int(user_id_str)
+
+            if success:
+                # Успех! Продлеваем подписку
+                await activate_subscription(user_id, months=1)
+                
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "✅ <b>Подписка продлена!</b>\n\n"
+                        "Списано 149 ₽ с сохраненной карты. "
+                        "Твоя подписка продлена еще на 30 дней.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    logger.error(f"Не удалось отправить уведомление пользователю {user_id_str}")
+            
+            else:
+                # Ошибка списания (недостаточно средств, карта просрочена и т.д.)
+                # Выключаем автопродление, чтобы не долбить мертвую карту каждый день
+                await update_user_status(user_id, "auto_renewal", False)
+                
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"❌ <b>Не удалось продлить подписку</b>\n\n"
+                        f"Причина: {error}\n\n"
+                        "Автопродление отключено. Пожалуйста, обновите данные карты в настройках подписки.",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    logger.error(f"Не удалось отправить уведомление об ошибке пользователю {user_id_str}")
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки пользователя {user_id_str}: {e}")
+
+    logger.info("Процесс автопродления завершен.")
 
 async def save_user_preference(user_id: int, preference: str):
     """Сохраняет предпочтение пользователя в JSON файл."""
@@ -189,11 +285,13 @@ async def get_user_status(user_id: int) -> dict:
                     "is_paid": is_paid,
                     "subscription_end_date": sub_end_str,
                     "trial_started": user_data.get("trial_started", False),
-                    "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False)
+                    "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False),
+                    "auto_renewal": user_data.get("auto_renewal", False), # НОВЫЙ ФЛАГ
+                    "payment_method_id": user_data.get("payment_method_id") # ID сохраненной карты
                 }
         except Exception:
             pass
-    return {"is_paid": False, "subscription_end_date": None, "trial_started": False, "payment_screen_shown_day5": False}
+    return {"is_paid": False, "subscription_end_date": None, "trial_started": False, "payment_screen_shown_day5": False, "auto_renewal": False, "payment_method_id": None}
 
 async def update_user_status(user_id: int, key: str, value):
     """Обновляет конкретное поле статуса."""
@@ -285,10 +383,8 @@ async def show_payment_screen(user_id: int, message_obj: types.Message = None, c
         f"дерево сейчас — росток.\n\n" # Можно подтянуть реальные данные из TreeProgress
         "Хочешь продолжить развивать своё дерево?\n"
         "Доступ к функциям бота будет стоить \n"
-        "30 дней — 149 рублей.\n"
-        "Без автоматической оплаты - \n"
-        "Ты сам выбираешь, пользоваться дальше или нет\n"
-        "Подписку можно отменить в любой момент."
+        "30 дней — 149 рублей,\n"
+        "С автоплатежом. \n"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Разблокировать 30 дней — 149 ₽", callback_data="pay_unlock")]
@@ -425,7 +521,7 @@ async def callback_reg_answer(callback: types.CallbackQuery):
     """Обработка ответа и показ меню"""
     # Сохраняем предпочтение
     await save_user_preference(callback.from_user.id, callback.data)
-    # аооаоалоаллал
+    
     # Помечаем, что пользователь зарегистрирован (если нужно в is_user_registered)
     # Если is_user_registered просто проверяет файл предпочтений, то всё ОК.
     
@@ -478,7 +574,7 @@ async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
             )
     else:
         await callback.message.answer("❌ Не удалось создать ссылку на оплату. Проверь логи.")
-# jfgf
+
 
 @dp.callback_query(F.data == "check_payment_status")
 async def callback_check_payment_status(callback: types.CallbackQuery, state: FSMContext):
@@ -497,33 +593,35 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
 
     await callback.answer("Проверяю статус...")
 
-    # Вспомогательная синхронная функция для запуска в потоке
-    # Явно передаем конфигурацию, чтобы избежать ошибок потоков
     def _find_one_wrapper(p_id):
         Configuration.account_id = os.getenv("YOOKASSA_SHOP_ID")
         Configuration.secret_key = os.getenv("YOOKASSA_SECRET_KEY")
         return Payment.find_one(p_id)
 
     try:
-        # Запускаем обертку в отдельном потоке
         payment = await asyncio.to_thread(_find_one_wrapper, payment_id)
-        
         logger.info(f"Ответ от ЮKassa: {payment}, Тип: {type(payment)}")
 
-        if not payment:
-            await callback.answer("Не удалось получить информацию о платеже (пустой ответ).")
-            return
-
-        if not hasattr(payment, 'status'):
-             await callback.answer(f"Неожиданный формат ответа от банка. Тип: {type(payment)}")
+        if not payment or not hasattr(payment, 'status'):
+             await callback.answer(f"Неожиданный формат ответа от банка.")
              return
 
         if payment.status == "succeeded":
+            # ИЗМЕНЕНИЕ: Сохраняем payment_method_id, если карта была сохранена
+            if hasattr(payment, 'payment_method') and hasattr(payment.payment_method, 'id'):
+                saved_method_id = payment.payment_method.id
+                await update_user_status(user_id, "payment_method_id", saved_method_id)
+                logger.info(f"Сохранен payment_method_id: {saved_method_id} для пользователя {user_id}")
+
+            # Включаем автопродление по умолчанию при первой успешной оплате картой
+            await update_user_status(user_id, "auto_renewal", True)
+
             await activate_subscription(user_id)
             await state.clear()
             
             await callback.message.edit_text(
-                "✅ Оплата прошла успешно! Подписка активирована.\n\nДобро пожаловать!",
+                "✅ Оплата прошла успешно! Подписка активирована.\n\n"
+                "Карта сохранена для автопродления.",
                 reply_markup=get_main_keyboard()
             )
         elif payment.status == "pending":
@@ -660,6 +758,7 @@ async def cmd_help(message: types.Message) -> None:
         "• /help - Эта справка\n"
         "• /cancel - Отмена текущего действия\n\n"
         "• /tariffs - Информация о тарифах и возможностях\n\n"
+        "• Поддержка - @prosto_mif"
         "Функции кнопок:\n"
         "• ⏸️ <b>Я иду в TikTok</b> - Пауза перед TikTok\n"
         # "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
@@ -691,71 +790,37 @@ async def cmd_tariffs(message: types.Message) -> None:
         "• Кнопка «Я иду в TikTok» (осознанная фиксация входа)\n"
         "• Статистика попыток и активности\n"
         "• Отслеживание дней использования\n\n"
-        "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n\n"
+        "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n"
+        "С автопродлением\n"
+        "Вы можете в любой момент отключить автопродление в разделе «Подписка».\n"
+        "Деньги за уже начтаый оплаченный месяц не возвращаются.\n"
+        "Исключение - технические ошибки (двойное списанеи, списание после отмены,\n"
+        "длительная недоступность бота). В этих случаях мы вернем деньги за обращение в поддержку.\n"
+        "Поддержка @prosto_m1f.\n\n"
         "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
     )
 
     # Логика отображения статуса подписки
     if status["is_paid"] and status["subscription_end_date"]:
         try:
-            # Форматируем дату для красивого вывода (например, 21.02.2026)
             end_date = datetime.fromisoformat(status["subscription_end_date"])
-            date_str = end_date.strftime("%d.%m.%Y")
+            date_str = end_date.strftime("%d.%m.%Y %H:%M")
         except ValueError:
-            # Если формат даты сломался, выводим как есть
             date_str = status["subscription_end_date"]
         
-        text += f"\n\n✅ <b>Твоя подписка активна до: {date_str}</b>"
-        button_text = "Продлить подписку"
+        renewal_text = "Включено" if status["auto_renewal"] else "Выключено"
+        text += f"✅ <b>Подписка активна до:</b> {date_str}\n"
+        text += f"🔄 <b>Автопродление:</b> {renewal_text}\n\n"
+        button_text = "Управление подпиской"
     else:
         button_text = "Купить за 149 ₽"
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=button_text, callback_data="pay_unlock")]
-    ])
-    
-    await message.answer(text, parse_mode='HTML', reply_markup=keyboard)@dp.message(Command("tariffs"))
-async def cmd_tariffs(message: types.Message) -> None:
-    """Показывает информацию о тарифах и возможностях бота."""
-    user_id = message.from_user.id
-    status = await get_user_status(user_id)
-
-    text = (
-        "<b>Тарифы и возможности</b>\n\n"
-        "Telegram-бот помогает пользователю контролировать время использования TikTok, "
-        "отслеживать осознанные заходы в приложение и формировать привычку управления вниманием.\n\n"
-        "<b>Условия доступа:</b>\n"
-        "• Первые 5 дней предоставляются бесплатно.\n"
-        "• После окончания пробного периода подключается доступ на 30 дней стоимостью 149 рублей.\n\n"
-        "<b>Функции бота:</b>\n"
-        "• Кнопка «SOS» (быстрая поддержка в момент желания зайти в TikTok)\n"
-        "• Кнопка «Я иду в TikTok» (осознанная фиксация входа)\n"
-        "• Статистика попыток и активности\n"
-        "• Отслеживание дней использования\n\n"
-        "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n\n"
-        "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
-    )
-
-    # Логика отображения статуса подписки
-    if status["is_paid"] and status["subscription_end_date"]:
-        try:
-            # Форматируем дату для красивого вывода (например, 21.02.2026)
-            end_date = datetime.fromisoformat(status["subscription_end_date"])
-            date_str = end_date.strftime("%d.%m.%Y")
-        except ValueError:
-            # Если формат даты сломался, выводим как есть
-            date_str = status["subscription_end_date"]
-        
-        text += f"\n\n✅ <b>Твоя подписка активна до: {date_str}</b>"
-        button_text = "Продлить подписку"
-    else:
-        button_text = "Купить за 149 ₽"
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=button_text, callback_data="pay_unlock")]
+        [InlineKeyboardButton(text=button_text, callback_data="manage_subscription")]
     ])
     
     await message.answer(text, parse_mode='HTML', reply_markup=keyboard)
+
 
 
 async def quick_pause_timer_with_finish(user_id: int, minutes: int, bot: Bot):
@@ -823,6 +888,74 @@ async def callback_quick_pause_start(callback: types.CallbackQuery, state: FSMCo
     
     await callback.message.answer("Что за этим сейчас стоит?", reply_markup=keyboard)
     await callback.answer()
+
+@dp.callback_query(F.data == "manage_subscription")
+async def callback_manage_subscription(callback: types.CallbackQuery):
+    """Экран управления подпиской"""
+    user_id = callback.from_user.id
+    status = await get_user_status(user_id)
+    
+    if status["is_paid"] and status["subscription_end_date"]:
+        try:
+            end_date = datetime.fromisoformat(status["subscription_end_date"])
+            date_str = end_date.strftime("%d.%m.%Y")
+        except ValueError:
+            date_str = "Ошибка даты"
+            
+        renewal_status = "✅ Включено" if status["auto_renewal"] else "❌ Выключено"
+        card_info = "💳 Карта привязана" if status["payment_method_id"] else "💳 Карта не привязана"
+        
+        text = (
+            f"<b>Управление подпиской</b>\n\n"
+            f"Действует до: {date_str}\n"
+            f"{card_info}\n"
+            f"Автопродление: {renewal_status}\n\n"
+            f"Если автопродление включено и карта привязана, "
+            f"списание произойдет автоматически за день до окончания."
+        )
+        
+        # Кнопка переключения автопродления
+        toggle_btn_text = "Выключить автопродление" if status["auto_renewal"] else "Включить автопродление"
+        toggle_btn_data = "sub_toggle_renewal"
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=toggle_btn_text, callback_data=toggle_btn_data)],
+            [InlineKeyboardButton(text="Продлить сейчас (+30 дней)", callback_data="pay_unlock")],
+            [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+        ])
+    else:
+        # Если нет подписки
+        text = "У вас нет активной подписки."
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку", callback_data="pay_unlock")],
+            [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+        ])
+        
+    await callback.message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data == "sub_toggle_renewal")
+async def callback_toggle_renewal(callback: types.CallbackQuery):
+    """Включает или выключает автопродление"""
+    user_id = callback.from_user.id
+    status = await get_user_status(user_id)
+    
+    # Если карта не привязана, нельзя включить автопродление
+    new_status = not status["auto_renewal"]
+    
+    if new_status and not status["payment_method_id"]:
+        await callback.answer("❌ Сначала нужно оплатить подписку, чтобы привязать карту.")
+        return
+
+    await update_user_status(user_id, "auto_renewal", new_status)
+    
+    status_text = "включено" if new_status else "выключено"
+    await callback.answer(f"Автопродление {status_text}.")
+    
+    # Обновляем экран
+    await callback_manage_subscription(callback)
+
+
 
 @dp.callback_query(F.data.startswith("qp_reason_"))
 async def callback_quick_pause_reason(callback: types.CallbackQuery, state: FSMContext):
@@ -1412,6 +1545,23 @@ async def main() -> None:
     """Запуск бота"""
     print("Бот запускается...")
     await start_reminder_system(bot)
+    #  --- ДОБАВЛЯЕМ ПЛАНИРОВЩИК АВТОПРОДЛЕНИЯ ---
+    # Для работы нужен APScheduler (он обычно уже есть в aiogram проектах)
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+    
+    scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+    
+    # Запускаем проверку каждый день в 09:00 утра
+    scheduler.add_job(
+        process_auto_renewals, 
+        trigger=CronTrigger(hour=9, minute=0), 
+        kwargs={"bot": bot}
+    )
+    scheduler.start()
+    print("Планировщик автопродления запущен (ежедневно в 09:00).")
+    # -------------------------------------------
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

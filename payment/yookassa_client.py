@@ -44,6 +44,7 @@ async def create_payment(user_id: int, return_url: str) -> tuple[str | None, str
             "metadata": {
                 "user_id": str(user_id)
             },
+            "save_payment_method": True,
             "test": False # Сюда потом поставим False для боевого режима
         }
         
@@ -59,6 +60,42 @@ async def create_payment(user_id: int, return_url: str) -> tuple[str | None, str
     except Exception as e:
         logger.error(f"Ошибка создания платежа: {e}")
         return None, None
+
+async def charge_saved_card(payment_method_id: str, amount_value: str = "149.00") -> tuple[bool, str | None]:
+    """
+    Создает платеж с использованием сохраненного метода оплаты (автопродление).
+    Возвращает кортеж: (success: bool, error_message: str | None)
+    """
+    if not Configuration.account_id or not Configuration.secret_key:
+        return False, "Ошибка конфигурации API"
+
+    try:
+        payment_dict = {
+            "amount": {
+                "value": amount_value,
+                "currency": "RUB"
+            },
+            "payment_method_data": {
+                "id": payment_method_id # Используем сохраненный ID
+            },
+            "capture": True, # Сразу списываем
+            "description": "Автоматическое продление подписки UnTT",
+            "test": True 
+        }
+        
+        # Запускаем в отдельном потоке, так как библиотека синхронная
+        payment = await asyncio.to_thread(Payment.create, payment_dict)
+
+        if payment.status == "succeeded":
+            logger.info(f"Автопродление прошло успешно. Payment ID: {payment.id}")
+            return True, None
+        else:
+            logger.error(f"Автопродление не удалось. Статус: {payment.status}")
+            return False, f"Ошибка списания: {payment.status}"
+            
+    except Exception as e:
+        logger.error(f"Исключение при автопродлении: {e}")
+        return False, str(e)
 
 def calculate_subscription_end_date(months: int = 1) -> str:
     """Вычисляет дату окончания подписки."""
