@@ -40,6 +40,7 @@ from stats.user_stats import update_stats, get_stats
 from registration import is_user_registered
 from payment.yookassa_client import create_payment, calculate_subscription_end_date
 from yookassa import Payment, Configuration 
+from aiohttp import web
 
 # ... (импорты)
 
@@ -1714,13 +1715,66 @@ async def check_and_send_day5_reminder(bot: Bot):
         except Exception:
             pass
 
+async def handle_webhook(request: web.Request) -> web.Response:
+    """
+    Обработчик входящих обновлений от Telegram через Webhook.
+    """
+    # Проверка секретного токена (опционально, но для безопасности полезно)
+    secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    if secret_token != os.getenv("WEBHOOK_SECRET"):
+        logger.warning("Получен запрос с неверным секретным токеном.")
+        return web.Response(status=403, text="Forbidden")
+
+    try:
+        # Получаем данные обновления
+        update_data = await request.json()
+        
+        # Создаем объект Update и передаем в диспетчер
+        update = types.Update(**update_data)
+        await dp.feed_webhook_update(bot, update)
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке вебхука: {e}")
+        return web.Response(status=500)
+
+    return web.Response(status=200)
+
+async def health_check(request: web.Request) -> web.Response:
+    """
+    Эндпоинт для UptimeRobot. Возвращает OK, если бот жив.
+    Этот запрос не дает боту "уснуть" на Render.
+    """
+    return web.Response(text="OK")
 
 
 async def main() -> None:
-    """Запуск бота"""
-    print("Бот запускается...")
+    """Запуск бота через Webhook"""
     
-    # Запуск системы напоминаний
+    # 1. Получаем настройки из переменных окружения
+    # Render автоматически устанавливает переменную PORT
+    port = int(os.getenv("PORT", 10000))
+    webhook_url = os.getenv("WEBHOOK_URL") # Полный URL, например https://myapp.onrender.com/webhook
+    webhook_path = os.getenv("WEBHOOK_PATH", "/webhook") # Путь, например /webhook
+    webhook_secret = os.getenv("WEBHOOK_SECRET") # Секретный ключ для проверки запросов
+    
+    if not webhook_url:
+        logger.critical("Ошибка: Переменная окружения WEBHOOK_URL не задана!")
+        return
+
+    # 2. Настройка бота
+    logger.info(f"Запуск бота в режиме Webhook на порту {port}...")
+    
+    # Удаляем старый вебхук, если был (для чистоты)
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Устанавливаем новый вебхук
+    await bot.set_webhook(
+        url=webhook_url,
+        secret_token=webhook_secret
+    )
+    logger.info(f"Вебхук установлен: {webhook_url}")
+
+    # 3. Запуск системы напоминаний (планировщика)
     await start_reminder_system(bot)
     
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -1729,41 +1783,64 @@ async def main() -> None:
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
     
     # --- ОНБОРДИНГ НАПОМИНАНИЯ ---
-    # День 1: 18:00
     scheduler.add_job(
         check_and_send_day1_reminder, 
         trigger=CronTrigger(hour=18, minute=0), 
         kwargs={"bot": bot}
     )
-    
-    # День 3: 20:00
     scheduler.add_job(
         check_and_send_day3_reminder, 
         trigger=CronTrigger(hour=20, minute=0), 
         kwargs={"bot": bot}
     )
-    
-    # День 5: 22:00
     scheduler.add_job(
         check_and_send_day5_reminder, 
         trigger=CronTrigger(hour=22, minute=0), 
         kwargs={"bot": bot}
     )
     # -----------------------------
-
-    # --- НАПОМИНАНИЕ О ПРОДЛЕНИИ (для платных) ---
-    # Оставляем проверку на 10:00 для тех, у кого уже куплена подписка
+    
     scheduler.add_job(
         send_renewal_reminders, 
         trigger=CronTrigger(hour=10, minute=0), 
         kwargs={"bot": bot}
     )
-    # ----------------------------------------
-
-    scheduler.start()
-    print("Планировщик запущен.")
     
-    await dp.start_polling(bot)
+    scheduler.start()
+    logger.info("Планировщик запущен.")
+
+    # 4. Создание и запуск веб-сервера
+    app = web.Application()
+    
+    # Роут для Telegram (POST запросы)
+    app.router.add_post(webhook_path, handle_webhook)
+    
+    # Роут для проверки здоровья (GET запрос для UptimeRobot)
+    app.router.add_get('/health', health_check)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+    
+    logger.info(f"Сервер запущен. Ожидаю обновления на {webhook_url}...")
+    
+    # Бот работает бесконечно, пока работает веб-сервер
+    try:
+        # Просто держим скрипт активным
+        while True:
+            await asyncio.sleep(3600) 
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Остановка бота...")
+    finally:
+        await runner.cleanup()
+        await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Важно: используем web.run_app если нужно, 
+    # но здесь мы вручную создаем runner для контроля над планировщиком
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
