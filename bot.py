@@ -765,8 +765,14 @@ async def callback_onboarding_next(callback: types.CallbackQuery):
 @dp.callback_query(F.data.in_(["reg_sleep", "reg_day", "reg_evening", "reg_every"]))
 async def callback_finish_onboarding(callback: types.CallbackQuery):
     """Сохраняет выбор (опционально) и показывает главное меню"""
-    # Здесь можно сохранить callback_data в БД, если нужно
-    await save_user_preference(callback.from_user.id, callback.data)
+    user_id = callback.from_user.id
+    
+    # Сохраняем предпочтение
+    await save_user_preference(user_id, callback.data)
+    
+    # --- НОВОЕ: Сохраняем точную дату регистрации для рассылки ---
+    await update_user_status(user_id, "registration_date", datetime.now().isoformat())
+    # -----------------------------------------------------------
     
     await callback.message.edit_text(
         "Запомнил.\n\n"
@@ -1583,7 +1589,133 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
+async def check_and_send_day1_reminder(bot: Bot):
+    """День 1, 18:00: unTT здесь. Можешь заметить момент перед TikTok."""
+    logger.info("Проверка напоминаний: День 1 (18:00)...")
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        return
 
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    now = datetime.now()
+    
+    for user_id_str, user_data in data.items():
+        try:
+            # Пропускаем, если уже отправляли
+            if user_data.get("sent_onboarding_day1"):
+                continue
+
+            reg_date_str = user_data.get("registration_date")
+            if not reg_date_str:
+                continue
+            
+            reg_date = datetime.fromisoformat(reg_date_str)
+            days_passed = (now - reg_date).days
+            
+            # Если прошел 1 день (от 0 до 1 суток)
+            if days_passed == 0: 
+                user_id = int(user_id_str)
+                try:
+                    await bot.send_message(user_id, "unTT здесь. Можешь заметить момент перед TikTok.")
+                    await update_user_status(user_id, "sent_onboarding_day1", True)
+                    logger.info(f"Отправлено напоминание Дня 1 пользователю {user_id}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+async def check_and_send_day3_reminder(bot: Bot):
+    """День 3, 20:00: Сегодня ещё не отмечал моменты. Всё ок?"""
+    logger.info("Проверка напоминаний: День 3 (20:00)...")
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    now = datetime.now()
+    
+    for user_id_str, user_data in data.items():
+        try:
+            if user_data.get("sent_onboarding_day3"):
+                continue
+
+            reg_date_str = user_data.get("registration_date")
+            if not reg_date_str:
+                continue
+            
+            reg_date = datetime.fromisoformat(reg_date_str)
+            days_passed = (now - reg_date).days
+            
+            # Если прошел 3 день (от 2 до 3 суток)
+            if days_passed == 2:
+                user_id = int(user_id_str)
+                try:
+                    await bot.send_message(user_id, "Сегодня ещё не отмечал моменты. Всё ок?")
+                    await update_user_status(user_id, "sent_onboarding_day3", True)
+                    logger.info(f"Отправлено напоминание Дня 3 пользователю {user_id}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+async def check_and_send_day5_reminder(bot: Bot):
+    """День 5, 22:00: Последний день пробного. Хочешь продолжить?"""
+    logger.info("Проверка напоминаний: День 5 (22:00)...")
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    now = datetime.now()
+    
+    for user_id_str, user_data in data.items():
+        try:
+            if user_data.get("sent_onboarding_day5"):
+                continue
+
+            reg_date_str = user_data.get("registration_date")
+            if not reg_date_str:
+                continue
+            
+            reg_date = datetime.fromisoformat(reg_date_str)
+            days_passed = (now - reg_date).days
+            
+            # Если прошел 5 день (от 4 до 5 суток)
+            if days_passed == 4:
+                user_id = int(user_id_str)
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Продлить подписку", callback_data="pay_unlock")]
+                ])
+                try:
+                    await bot.send_message(
+                        user_id, 
+                        "Последний день пробного. Хочешь продолжить?",
+                        reply_markup=keyboard
+                    )
+                    await update_user_status(user_id, "sent_onboarding_day5", True)
+                    logger.info(f"Отправлено напоминание Дня 5 пользователю {user_id}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 
@@ -1594,22 +1726,46 @@ async def main() -> None:
     # Запуск системы напоминаний
     await start_reminder_system(bot)
     
-    # --- ПЛАНИРОВЩИК НАПОМИНАНИЙ О ПРОДЛЕНИИ ---
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
     
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
     
-    # Запускаем проверку каждый день в 10:00 утра
+    # --- ОНБОРДИНГ НАПОМИНАНИЯ ---
+    # День 1: 18:00
+    scheduler.add_job(
+        check_and_send_day1_reminder, 
+        trigger=CronTrigger(hour=18, minute=0), 
+        kwargs={"bot": bot}
+    )
+    
+    # День 3: 20:00
+    scheduler.add_job(
+        check_and_send_day3_reminder, 
+        trigger=CronTrigger(hour=20, minute=0), 
+        kwargs={"bot": bot}
+    )
+    
+    # День 5: 22:00
+    scheduler.add_job(
+        check_and_send_day5_reminder, 
+        trigger=CronTrigger(hour=22, minute=0), 
+        kwargs={"bot": bot}
+    )
+    # -----------------------------
+
+    # --- НАПОМИНАНИЕ О ПРОДЛЕНИИ (для платных) ---
+    # Оставляем проверку на 10:00 для тех, у кого уже куплена подписка
     scheduler.add_job(
         send_renewal_reminders, 
         trigger=CronTrigger(hour=10, minute=0), 
         kwargs={"bot": bot}
     )
-    scheduler.start()
-    print("Планировщик напоминаний запущен (ежедневно в 10:00).")
-    # -------------------------------------------
+    # ----------------------------------------
 
+    scheduler.start()
+    print("Планировщик запущен.")
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
