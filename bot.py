@@ -270,7 +270,6 @@ async def get_user_status(user_id: int) -> dict:
                 data = json.load(f)
                 user_data = data.get(str(user_id), {})
                 
-                # Проверяем, активна ли подписка по дате
                 sub_end_str = user_data.get("subscription_end_date")
                 is_paid = False
                 if sub_end_str:
@@ -285,13 +284,11 @@ async def get_user_status(user_id: int) -> dict:
                     "is_paid": is_paid,
                     "subscription_end_date": sub_end_str,
                     "trial_started": user_data.get("trial_started", False),
-                    "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False),
-                    "auto_renewal": user_data.get("auto_renewal", False), # НОВЫЙ ФЛАГ
-                    "payment_method_id": user_data.get("payment_method_id") # ID сохраненной карты
+                    "payment_screen_shown_day5": user_data.get("payment_screen_shown_day5", False)
                 }
         except Exception:
             pass
-    return {"is_paid": False, "subscription_end_date": None, "trial_started": False, "payment_screen_shown_day5": False, "auto_renewal": False, "payment_method_id": None}
+    return {"is_paid": False, "subscription_end_date": None, "trial_started": False, "payment_screen_shown_day5": False}
 
 async def update_user_status(user_id: int, key: str, value):
     """Обновляет конкретное поле статуса."""
@@ -384,7 +381,8 @@ async def show_payment_screen(user_id: int, message_obj: types.Message = None, c
         "Хочешь продолжить развивать своё дерево?\n"
         "Доступ к функциям бота будет стоить \n"
         "30 дней — 149 рублей,\n"
-        "С автоплатежом. \n"
+        "Без автоплатежа. \n"
+        
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Разблокировать 30 дней — 149 ₽", callback_data="pay_unlock")]
@@ -573,7 +571,7 @@ async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
                 reply_markup=keyboard
             )
     else:
-        await callback.message.answer("❌ Не удалось создать ссылку на оплату. Проверь логи.")
+        await callback.message.answer("❌ Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
 
 
 @dp.callback_query(F.data == "check_payment_status")
@@ -583,7 +581,6 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
     """
     user_id = callback.from_user.id
     
-    # Получаем сохраненный ID платежа
     data = await state.get_data()
     payment_id = data.get("last_payment_id")
     
@@ -607,21 +604,13 @@ async def callback_check_payment_status(callback: types.CallbackQuery, state: FS
              return
 
         if payment.status == "succeeded":
-            # ИЗМЕНЕНИЕ: Сохраняем payment_method_id, если карта была сохранена
-            if hasattr(payment, 'payment_method') and hasattr(payment.payment_method, 'id'):
-                saved_method_id = payment.payment_method.id
-                await update_user_status(user_id, "payment_method_id", saved_method_id)
-                logger.info(f"Сохранен payment_method_id: {saved_method_id} для пользователя {user_id}")
-
-            # Включаем автопродление по умолчанию при первой успешной оплате картой
-            await update_user_status(user_id, "auto_renewal", True)
-
+            # Просто активируем подписку, без сохранения карт и автопродлений
             await activate_subscription(user_id)
             await state.clear()
             
             await callback.message.edit_text(
                 "✅ Оплата прошла успешно! Подписка активирована.\n\n"
-                "Карта сохранена для автопродления.",
+                "Я напомню тебе о продлении за день до окончания.",
                 reply_markup=get_main_keyboard()
             )
         elif payment.status == "pending":
@@ -665,7 +654,76 @@ async def callback_reg_intro(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+async def send_renewal_reminders(bot: Bot):
+    """
+    Фоновая задача: проверяет подписки и напоминает о продлении.
+    """
+    logger.info("Запуск проверки напоминаний о продлении...")
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        return
 
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка чтения файла пользователей: {e}")
+        return
+
+    now = datetime.now()
+    
+    for user_id_str, user_data in data.items():
+        try:
+            user_id = int(user_id_str)
+            
+            # Пропускаем, если подписки нет или она истекла
+            sub_end_str = user_data.get("subscription_end_date")
+            if not sub_end_str:
+                continue
+            
+            sub_end_date = datetime.fromisoformat(sub_end_str)
+            if sub_end_date <= now:
+                continue
+            
+            # Проверяем, отправляли ли мы уже напоминание
+            last_reminder = user_data.get("last_reminder_date")
+            if last_reminder:
+                last_rem_date = datetime.fromisoformat(last_reminder)
+                # Если напоминали в последние 5 дней, не спамим
+                if (now - last_rem_date).days < 5:
+                    continue
+
+            # Если до конца осталось 2 дня или меньше (но больше 0), отправляем
+            days_left = (sub_end_date - now).days
+            
+            if days_left <= 2:
+                logger.info(f"Отправка напоминания пользователю {user_id} (осталось {days_left} дн.)")
+                
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Продлить подписку", callback_data="pay_unlock")]
+                ])
+                
+                try:
+                    await bot.send_message(
+                        user_id,
+                        f"👋 Привет!\n\n"
+                        f"Твоя подписка закончится через {days_left} дн. ({sub_end_date.strftime('%d.%m.%Y')}).\n\n"
+                        f"Хочешь продолжить развивать осознанность?",
+                        reply_markup=keyboard
+                    )
+                    
+                    # Записываем, что напомнили
+                    await update_user_status(user_id, "last_reminder_date", now.isoformat())
+                    
+                except Exception:
+                    # Пользователь мог заблокировать бота
+                    logger.error(f"Не удалось отправить сообщение пользователю {user_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки пользователя {user_id_str}: {e}")
+
+    logger.info("Проверка напоминаний завершена.")
 
 
 
@@ -758,7 +816,7 @@ async def cmd_help(message: types.Message) -> None:
         "• /help - Эта справка\n"
         "• /cancel - Отмена текущего действия\n"
         "• /tariffs - Информация о тарифах и возможностях\n"
-        "• Поддержка - @prosto_mif\n\n"
+        "• Поддержка - @prosto_m1f\n\n"
         "Функции кнопок:\n"
         "• ⏸️ <b>Я иду в TikTok</b> - Пауза перед TikTok\n"
         # "• 📚 <b>Дневная практика</b> - Рефлексия дня + осознанная практика\n"
@@ -791,12 +849,12 @@ async def cmd_tariffs(message: types.Message) -> None:
         "• Статистика попыток и активности\n"
         "• Отслеживание дней использования\n\n"
         "Стоимость подписки фиксированная — 149 рублей за 30 дней доступа.\n"
-        "С автопродлением\n"
+        "Без автопродления\n"
         "Вы можете в любой момент отключить автопродление в разделе «Подписка».\n"
         "Деньги за уже начтаый оплаченный месяц не возвращаются.\n"
         "Исключение - технические ошибки (двойное списанеи, списание после отмены,\n"
         "длительная недоступность бота). В этих случаях мы вернем деньги за обращение в поддержку.\n"
-        "Поддержка @prosto_m1f.\n\n"
+        "Поддержка @prosto_m1f\n\n"
         "<i>Бот не является официальным продуктом TikTok и не связан с компанией TikTok.</i>"
     )
 
@@ -902,29 +960,17 @@ async def callback_manage_subscription(callback: types.CallbackQuery):
         except ValueError:
             date_str = "Ошибка даты"
             
-        renewal_status = "✅ Включено" if status["auto_renewal"] else "❌ Выключено"
-        card_info = "💳 Карта привязана" if status["payment_method_id"] else "💳 Карта не привязана"
-        
         text = (
             f"<b>Управление подпиской</b>\n\n"
-            f"Действует до: {date_str}\n"
-            f"{card_info}\n"
-            f"Автопродление: {renewal_status}\n\n"
-            f"Если автопродление включено и карта привязана, "
-            f"списание произойдет автоматически за день до окончания."
+            f"Действует до: {date_str}\n\n"
+            f"Когда подписка закончится, бот предложит её продлить."
         )
         
-        # Кнопка переключения автопродления
-        toggle_btn_text = "Выключить автопродление" if status["auto_renewal"] else "Включить автопродление"
-        toggle_btn_data = "sub_toggle_renewal"
-        
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_btn_text, callback_data=toggle_btn_data)],
             [InlineKeyboardButton(text="Продлить сейчас (+30 дней)", callback_data="pay_unlock")],
             [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
         ])
     else:
-        # Если нет подписки
         text = "У вас нет активной подписки."
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Оформить подписку", callback_data="pay_unlock")],
@@ -1544,24 +1590,26 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext):
 async def main() -> None:
     """Запуск бота"""
     print("Бот запускается...")
+    
+    # Запуск системы напоминаний
     await start_reminder_system(bot)
-    #  --- ДОБАВЛЯЕМ ПЛАНИРОВЩИК АВТОПРОДЛЕНИЯ ---
-    # Для работы нужен APScheduler (он обычно уже есть в aiogram проектах)
+    
+    # --- ПЛАНИРОВЩИК НАПОМИНАНИЙ О ПРОДЛЕНИИ ---
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
     
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
     
-    # Запускаем проверку каждый день в 09:00 утра
+    # Запускаем проверку каждый день в 10:00 утра
     scheduler.add_job(
-        process_auto_renewals, 
-        trigger=CronTrigger(hour=9, minute=0), 
+        send_renewal_reminders, 
+        trigger=CronTrigger(hour=10, minute=0), 
         kwargs={"bot": bot}
     )
     scheduler.start()
-    print("Планировщик автопродления запущен (ежедневно в 09:00).")
+    print("Планировщик напоминаний запущен (ежедневно в 10:00).")
     # -------------------------------------------
-    
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
