@@ -125,100 +125,7 @@ def parse_duration(text: str) -> int:
         
     return None
 
-async def process_auto_renewals(bot: Bot):
-    """
-    Фоновая задача: проверяет пользователей с автопродлением и списывает средства.
-    """
-    logger.info("Запуск процесса автопродления подписок...")
-    file_path = "data/user_preferences.json"
-    
-    if not os.path.exists(file_path):
-        return
 
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка чтения файла пользователей: {e}")
-        return
-
-    now = datetime.now()
-    # Проверяем подписки, которые заканчиваются сегодня или завтра
-    # (Окно в 2 дня, чтобы не пропустить из-за разницы во времени выполнения скрипта)
-    time_threshold = now + timedelta(days=2) 
-
-    for user_id_str, user_data in data.items():
-        try:
-            # 1. Проверяем флаг автопродления
-            if not user_data.get("auto_renewal"):
-                continue
-
-            # 2. Проверяем наличие привязанной карты
-            payment_method_id = user_data.get("payment_method_id")
-            if not payment_method_id:
-                logger.warning(f"User {user_id_str}: Автопродление включено, но карта не привязана.")
-                continue
-
-            # 3. Проверяем дату окончания
-            sub_end_str = user_data.get("subscription_end_date")
-            if not sub_end_str:
-                continue
-            
-            sub_end_date = datetime.fromisoformat(sub_end_str)
-            
-            # Если подписка кончается больше чем через 2 дня, пропускаем
-            if sub_end_date > time_threshold:
-                continue
-            
-            # Если подписка уже кончилась давно (больше 5 дней назад), тоже пропускаем, 
-            # чтобы не спамить старыми пользователями
-            if sub_end_date < now - timedelta(days=5):
-                continue
-
-            # --- ПОПЫТКА СПИСАНИЯ ---
-            logger.info(f"Попытка автопродления для пользователя {user_id_str}...")
-            
-            # Импортируем функцию клиента
-            from payment.yookassa_client import charge_saved_card
-            
-            success, error = await charge_saved_card(payment_method_id)
-            user_id = int(user_id_str)
-
-            if success:
-                # Успех! Продлеваем подписку
-                await activate_subscription(user_id, months=1)
-                
-                try:
-                    await bot.send_message(
-                        user_id,
-                        "✅ <b>Подписка продлена!</b>\n\n"
-                        "Списано 149 ₽ с сохраненной карты. "
-                        "Твоя подписка продлена еще на 30 дней.",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    logger.error(f"Не удалось отправить уведомление пользователю {user_id_str}")
-            
-            else:
-                # Ошибка списания (недостаточно средств, карта просрочена и т.д.)
-                # Выключаем автопродление, чтобы не долбить мертвую карту каждый день
-                await update_user_status(user_id, "auto_renewal", False)
-                
-                try:
-                    await bot.send_message(
-                        user_id,
-                        f"❌ <b>Не удалось продлить подписку</b>\n\n"
-                        f"Причина: {error}\n\n"
-                        "Автопродление отключено. Пожалуйста, обновите данные карты в настройках подписки.",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    logger.error(f"Не удалось отправить уведомление об ошибке пользователю {user_id_str}")
-
-        except Exception as e:
-            logger.error(f"Ошибка обработки пользователя {user_id_str}: {e}")
-
-    logger.info("Процесс автопродления завершен.")
 
 async def save_user_preference(user_id: int, preference: str):
     """Сохраняет предпочтение пользователя в JSON файл."""
@@ -538,6 +445,116 @@ async def callback_reg_answer(callback: types.CallbackQuery):
         reply_markup=get_main_keyboard()
     )
     await callback.answer()
+
+@dp.message(Command("admin"))
+async def cmd_admin_stats(message: types.Message) -> None:
+    """Показывает статистику по боту (только для админа)."""
+    
+    # Проверка, что команду использует админ
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У тебя нет доступа к этой команде.")
+        return
+
+    await message.answer("📊 Собираю статистику...")
+    
+    file_path = "data/user_preferences.json"
+    
+    if not os.path.exists(file_path):
+        await message.answer("Пока нет данных.")
+        return
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            all_data = json.load(f)
+    except Exception as e:
+        await message.answer(f"Ошибка чтения: {e}")
+        return
+
+    # Счетчики
+    total_users = 0
+    paid_users = 0
+    trial_users = 0 # До 5 дней, но без подписки
+    trial_finished = 0 # Больше 5 дней, но без подписки
+    
+    # Список ID пользователей для проверки дерева
+    user_ids = []
+
+    for user_id_str, user_data in all_data.items():
+        total_users += 1
+        user_ids.append(int(user_id_str))
+        
+        # Проверяем подписку
+        sub_end_str = user_data.get("subscription_end_date")
+        is_paid = False
+        
+        if sub_end_str:
+            try:
+                sub_end = datetime.fromisoformat(sub_end_str)
+                if sub_end > datetime.now():
+                    is_paid = True
+            except ValueError:
+                pass
+        
+        if is_paid:
+            paid_users += 1
+        else:
+            # Если не оплачено, считаем по дереву
+            # Пока просто считаем всех неоплаченных в одну кучу
+            # Точнее проверим ниже через дерево
+            pass
+
+    # Теперь проверяем дерево для тех, у кого нет подписки
+    # Чтобы понять, дошли ли они до 5 дня
+    reached_day_5 = 0
+    active_trees = 0
+    
+    for uid in user_ids:
+        try:
+            from tree_progress.tree import TreeProgress
+            tree = TreeProgress(uid)
+            if tree.load():
+                active_trees += 1
+                
+                # Проверяем статус подписки этого пользователя
+                user_data = all_data.get(str(uid), {})
+                sub_end_str = user_data.get("subscription_end_date")
+                is_paid = False
+                
+                if sub_end_str:
+                    try:
+                        sub_end = datetime.fromisoformat(sub_end_str)
+                        if sub_end > datetime.now():
+                            is_paid = True
+                    except ValueError:
+                        pass
+                
+                # Если нет подписки и дерево >= 5 дней
+                if not is_paid and tree.total_days >= 5:
+                    reached_day_5 += 1
+                    
+        except Exception:
+            pass
+
+    # Формируем красивый текст
+    text = (
+        f"<b>📊 Статистика бота UnTT</b>\n\n"
+        f"<b>👥 Пользователи:</b>\n"
+        f"• Всего зарегистрировано: <b>{total_users}</b>\n"
+        f"• Активных деревьев: <b>{active_trees}</b>\n\n"
+        f"<b>💰 Подписки:</b>\n"
+        f"• Купили подписку: <b>{paid_users}</b>\n"
+        f"• Завершили 5 дней без оплаты: <b>{reached_day_5}</b>\n\n"
+        f"<b>📈 Конверсия:</b>\n"
+    )
+    
+    # Вычисляем конверсию
+    if active_trees > 0:
+        conversion = (paid_users / active_trees) * 100
+        text += f"• Из активных в покупатели: <b>{conversion:.1f}%</b>\n"
+    else:
+        text += f"• Из активных в покупатели: <b>0%</b>\n"
+    
+    await message.answer(text, parse_mode='HTML')
 
 @dp.callback_query(F.data == "pay_unlock")
 async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
@@ -986,26 +1003,7 @@ async def callback_manage_subscription(callback: types.CallbackQuery):
     await callback.message.edit_text(text, parse_mode='HTML', reply_markup=keyboard)
     await callback.answer()
 
-@dp.callback_query(F.data == "sub_toggle_renewal")
-async def callback_toggle_renewal(callback: types.CallbackQuery):
-    """Включает или выключает автопродление"""
-    user_id = callback.from_user.id
-    status = await get_user_status(user_id)
-    
-    # Если карта не привязана, нельзя включить автопродление
-    new_status = not status["auto_renewal"]
-    
-    if new_status and not status["payment_method_id"]:
-        await callback.answer("❌ Сначала нужно оплатить подписку, чтобы привязать карту.")
-        return
 
-    await update_user_status(user_id, "auto_renewal", new_status)
-    
-    status_text = "включено" if new_status else "выключено"
-    await callback.answer(f"Автопродление {status_text}.")
-    
-    # Обновляем экран
-    await callback_manage_subscription(callback)
 
 
 
