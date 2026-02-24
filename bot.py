@@ -100,6 +100,9 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
             # InlineKeyboardButton(text=" Дерево прогресса", callback_data="tree_progress"),
             InlineKeyboardButton(text=" Статистика", callback_data="stats"),
             InlineKeyboardButton(text=" Подписка", callback_data="manage_subscription")
+        ],
+        [
+            InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")
         ]
         
     ]
@@ -309,6 +312,39 @@ async def show_payment_screen(user_id: int, message_obj: types.Message = None, c
 class RegStates(StatesGroup):
     waiting_answer = State()
 
+# --- ОБРАБОТЧИК ОТМЕНЫ ---
+
+@dp.callback_query(F.data == "cancel_action")
+@dp.message(Command("cancel"))
+async def cancel_action(event: types.Message | types.CallbackQuery, state: FSMContext):
+    """Отмена текущего действия и возврат в меню."""
+    
+    # Очищаем состояние
+    current_state = await state.get_state()
+    if current_state:
+        await state.clear()
+    
+    # Определяем, откуда пришел запрос (message или callback)
+    if isinstance(event, types.CallbackQuery):
+        msg = event.message
+        await event.answer()
+    else:
+        msg = event
+    
+    # Универсальный ответ
+    try:
+        await msg.answer(
+            "Действие отменено.\nВозвращаемся в меню.",
+            reply_markup=get_main_keyboard()
+        )
+    except Exception:
+        # Если сообщение нельзя отредактировать, отправляем новое
+        await msg.answer(
+            "Действие отменено.\nВозвращаемся в меню.",
+            reply_markup=get_main_keyboard()
+        )
+
+
 
 @dp.message(Command("unstart"))
 async def cmd_unstart(message: types.Message):
@@ -446,7 +482,7 @@ async def callback_reg_answer(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@dp.message(Command("admin"))
+@dp.message(Command("stats_admin"))
 async def cmd_admin_stats(message: types.Message) -> None:
     """Показывает статистику по боту (только для админа)."""
     
@@ -455,8 +491,6 @@ async def cmd_admin_stats(message: types.Message) -> None:
         await message.answer("⛔ У тебя нет доступа к этой команде.")
         return
 
-    await message.answer("📊 Собираю статистику...")
-    
     file_path = "data/user_preferences.json"
     
     if not os.path.exists(file_path):
@@ -471,95 +505,63 @@ async def cmd_admin_stats(message: types.Message) -> None:
         return
 
     # Счетчики
-    total_users = 0
+    total_users = len(all_data)
     paid_users = 0
-    trial_users = 0 # До 5 дней, но без подписки
-    trial_finished = 0 # Больше 5 дней, но без подписки
+    reached_day_5 = 0
     
-    # Список ID пользователей для проверки дерева
-    user_ids = []
-
+    # Проходим по всем пользователям
     for user_id_str, user_data in all_data.items():
-        total_users += 1
-        user_ids.append(int(user_id_str))
-        
         # Проверяем подписку
         sub_end_str = user_data.get("subscription_end_date")
-        is_paid = False
         
         if sub_end_str:
             try:
                 sub_end = datetime.fromisoformat(sub_end_str)
                 if sub_end > datetime.now():
-                    is_paid = True
+                    paid_users += 1
+                    continue # Если подписка есть, дерево не проверяем
             except ValueError:
                 pass
         
-        if is_paid:
-            paid_users += 1
-        else:
-            # Если не оплачено, считаем по дереву
-            # Пока просто считаем всех неоплаченных в одну кучу
-            # Точнее проверим ниже через дерево
-            pass
-
-    # Теперь проверяем дерево для тех, у кого нет подписки
-    # Чтобы понять, дошли ли они до 5 дня
-    reached_day_5 = 0
-    active_trees = 0
-    
-    for uid in user_ids:
+        # Если нет подписки, проверяем дерево (только для тех, кто не оплатил)
         try:
             from tree_progress.tree import TreeProgress
-            tree = TreeProgress(uid)
-            if tree.load():
-                active_trees += 1
-                
-                # Проверяем статус подписки этого пользователя
-                user_data = all_data.get(str(uid), {})
-                sub_end_str = user_data.get("subscription_end_date")
-                is_paid = False
-                
-                if sub_end_str:
-                    try:
-                        sub_end = datetime.fromisoformat(sub_end_str)
-                        if sub_end > datetime.now():
-                            is_paid = True
-                    except ValueError:
-                        pass
-                
-                # Если нет подписки и дерево >= 5 дней
-                if not is_paid and tree.total_days >= 5:
-                    reached_day_5 += 1
-                    
+            tree = TreeProgress(int(user_id_str))
+            if tree.load() and tree.total_days >= 5:
+                reached_day_5 += 1
         except Exception:
             pass
 
-    # Формируем красивый текст
+    # Вычисляем активных (те, у кого есть дерево)
+    active_users = total_users - reached_day_5 - paid_users + reached_day_5 # упрощаем
+    
+    # Формируем текст
+    conversion = (paid_users / total_users * 100) if total_users > 0 else 0
+    
     text = (
         f"<b>📊 Статистика бота UnTT</b>\n\n"
         f"<b>👥 Пользователи:</b>\n"
-        f"• Всего зарегистрировано: <b>{total_users}</b>\n"
-        f"• Активных деревьев: <b>{active_trees}</b>\n\n"
+        f"• Всего зарегистрировано: <b>{total_users}</b>\n\n"
         f"<b>💰 Подписки:</b>\n"
         f"• Купили подписку: <b>{paid_users}</b>\n"
         f"• Завершили 5 дней без оплаты: <b>{reached_day_5}</b>\n\n"
         f"<b>📈 Конверсия:</b>\n"
+        f"• От общего числа: <b>{conversion:.1f}%</b>"
     )
     
-    # Вычисляем конверсию
-    if active_trees > 0:
-        conversion = (paid_users / active_trees) * 100
-        text += f"• Из активных в покупатели: <b>{conversion:.1f}%</b>\n"
-    else:
-        text += f"• Из активных в покупатели: <b>0%</b>\n"
-    
     await message.answer(text, parse_mode='HTML')
-
+    
 @dp.callback_query(F.data == "pay_unlock")
 async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    return_url = f"https://t.me/UnTT1_bot" # Твой юзернейм бота
+    
+    # Проверяем, есть ли уже подписка
+    status = await get_user_status(user_id)
+    if status["is_paid"]:
+        await callback.answer("У тебя уже есть активная подписка!", show_alert=True)
+        return
+    
+    return_url = f"https://t.me/UnTT1_bot"
     
     await callback.answer("Создаю платеж...")
     
@@ -571,6 +573,16 @@ async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
         await state.update_data(last_payment_id=payment_id)
         await state.set_state(PaymentStates.waiting_for_payment)
         
+        # Сообщение о безопасности платежа
+        security_text = (
+            "🔒 <b>Безопасность платежа</b>\n\n"
+            "• Твои данные карты не хранятся ботом\n"
+            "• Платеж через ЮKassa (лицензированный платежный агрегатор)\n"
+            "• Без автосписания — платишь только один раз\n"
+            "• Чек придет на email, указанный при оплате\n\n"
+            "После оплаты нажми кнопку «Проверить оплату»."
+        )
+        
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить 149 ₽", url=payment_url)],
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_payment_status")]
@@ -578,19 +590,18 @@ async def callback_pay(callback: types.CallbackQuery, state: FSMContext):
         
         try:
             await callback.message.edit_text(
-                "Для продолжения доступа необходимо оплатить подписку.\n"
-                "После оплаты нажмите кнопку 'Проверить оплату'.",
+                security_text,
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
         except Exception:
             await callback.message.answer(
-                "Для продолжения доступа необходимо оплатить подписку.\n"
-                "После оплаты нажмите кнопку 'Проверить оплату'.",
+                security_text,
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
     else:
         await callback.message.answer("❌ Не удалось создать ссылку на оплату. Обратитесь в поддержку.")
-
 
 @dp.callback_query(F.data == "check_payment_status")
 async def callback_check_payment_status(callback: types.CallbackQuery, state: FSMContext):
@@ -1032,11 +1043,11 @@ async def callback_quick_pause_reason(callback: types.CallbackQuery, state: FSMC
         [InlineKeyboardButton(text="Я не пойду, передумал", callback_data="qp_change_mind")]
     ])
     
-    
-    
+    # ИСПРАВЛЕНО: добавляем reply_markup=keyboard
     await callback.message.answer(
         "Сколько времени ты готов отдать этому прямо сейчас?\n"
-        "Напиши в формате: 15 минут, 1 час или просто 30."
+        "Напиши в формате: 15 минут, 1 час или просто 30.",
+        reply_markup=keyboard
     )
     
     # Устанавливаем состояние ожидания текста
@@ -1170,13 +1181,12 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
         "Дерево отмечает этот выбор."
     )
     
-    # ... внутри callback_quick_pause_finish после update_stats ...
     
     # --- ЛОГИКА ТРИАЛА И ОПЛАТЫ ---
     status = await get_user_status(user_id)
     
     # 1. Если это первое осознанное решение (День 1)
-    if not status["trial_started"]:
+    if not status["trial_started"] and not status["is_paid"]:
         await update_user_status(user_id, "trial_started", True)
         await asyncio.sleep(1)
         await callback.message.answer(
@@ -1186,20 +1196,21 @@ async def callback_quick_pause_finish(callback: types.CallbackQuery, state: FSMC
         )
 
     # 2. Проверка на 5-й день (Показываем предложение оплатить)
-    try:
-        from tree_progress.tree import TreeProgress
-        tree = TreeProgress(user_id)
-        if tree.load():
-            # Если сегодня 5-й день и мы еще не показывали экран оплаты
-            if tree.total_days == 5 and not status["payment_screen_shown_day5"]:
-                await update_user_status(user_id, "payment_screen_shown_day5", True)
-                await asyncio.sleep(1)
-                # Используем callback.message, так как мы внутри callback
-                await show_payment_screen(user_id, callback_obj=callback)
-    except Exception as e:
-        logger.error(f"Ошибка проверки триала: {e}")
-    # --- КОНЕЦ ЛОГИКИ ---    
-    
+    if not status["is_paid"]:
+        try:
+            from tree_progress.tree import TreeProgress
+            tree = TreeProgress(user_id)
+            if tree.load():
+                # Если сегодня 5-й день и мы еще не показывали экран оплаты
+                if tree.total_days == 5 and not status["payment_screen_shown_day5"]:
+                    await update_user_status(user_id, "payment_screen_shown_day5", True)
+                    await asyncio.sleep(1)
+                    # Используем callback.message, так как мы внутри callback
+                    await show_payment_screen(user_id, callback_obj=callback)
+        except Exception as e:
+            logger.error(f"Ошибка проверки триала: {e}")
+        # --- КОНЕЦ ЛОГИКИ ---    
+        
     await callback.message.answer("Возвращаемся в меню...", reply_markup=get_main_keyboard())
     await callback.answer()
 
@@ -1525,7 +1536,7 @@ async def callback_sos_start(callback: types.CallbackQuery, state: FSMContext):
         ],
         [
             InlineKeyboardButton(text="Ничего конкретного", callback_data="sos_prio_none"),
-            InlineKeyboardButton(text="Отмена", callback_data="back_to_menu")
+            InlineKeyboardButton(text="Отмена", callback_data="cancel_action")
         ]
     ])
     
