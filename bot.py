@@ -1026,6 +1026,14 @@ async def callback_quick_pause_reason(callback: types.CallbackQuery, state: FSMC
     
     # Просим ввести время текстом
     await asyncio.sleep(0.5)
+
+    # ДОБАВЛЯЕМ КЛАВИАТУРУ С КНОПКОЙ "Я не пойду"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Я не пойду, передумал", callback_data="qp_change_mind")]
+    ])
+    
+    
+    
     await callback.message.answer(
         "Сколько времени ты готов отдать этому прямо сейчас?\n"
         "Напиши в формате: 15 минут, 1 час или просто 30."
@@ -1034,7 +1042,38 @@ async def callback_quick_pause_reason(callback: types.CallbackQuery, state: FSMC
     # Устанавливаем состояние ожидания текста
     await state.set_state(QuickPauseStates.waiting_time)
     await callback.answer()
+
+@dp.callback_query(F.data == "qp_change_mind")
+async def callback_quick_pause_change_mind(callback: types.CallbackQuery, state: FSMContext):
+    """Пользователь передумал идти в TikTok."""
+    user_id = callback.from_user.id
     
+    # Сохраняем данные в статистику как осознанное решение
+    try:
+        from stats.user_stats import update_stats
+        from tree_progress.tree import TreeProgress
+        
+        await update_stats(user_id, "conscious_stop")
+        
+        # Обновляем дерево
+        tree = TreeProgress(user_id)
+        result = await tree.add_day()
+        
+    except Exception as e:
+        logger.error(f"Ошибка обновления прогресса: {e}")
+
+    # Очищаем состояние
+    await state.clear()
+    
+    # Тихий ответ
+    await callback.message.edit_text(
+        "Ок.\n\n"
+        "Дерево отмечает выбор."
+    )
+    
+    await callback.message.answer("Возвращаемся в меню...", reply_markup=get_main_keyboard())
+    await callback.answer()
+
 @dp.message(QuickPauseStates.waiting_time)
 async def process_time_input(message: types.Message, state: FSMContext):
     """Обрабатывает ввод времени пользователем."""
