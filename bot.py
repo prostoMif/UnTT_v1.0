@@ -18,6 +18,8 @@ from aiohttp import web
 
 from config.texts import *
 from config.menu import *
+from config.texts import EXTENDED_MENU
+from config.menu import menu_no_sub, menu_with_sub, paywall_keyboard, back_keyboard
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -144,11 +146,8 @@ async def get_usage_days(user_id: int) -> int:
 
 
 async def check_access(user_id: int) -> bool:
-    """Полный доступ (премиум или в лимите бесплатных дней)"""
-    if await is_premium(user_id):
-        return True
-    days = await get_usage_days(user_id)
-    return days < FREE_DAYS_LIMIT
+    """Полный доступ — бесплатно навсегда для базовых функций"""
+    return True  # Всегда доступно
 
 
 async def activate_subscription(user_id: int, months: int = 1) -> datetime:
@@ -281,21 +280,38 @@ def parse_duration(text: str) -> int:
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext) -> None:
-    """Старт бота"""
+    """Расширенное меню с тарифами и хелпом"""
     user_id = message.from_user.id
     await state.clear()
     
-    # Регистрация - сохраняем дату
+    # Сохраняем дату регистрации
     status = await get_user_status(user_id)
     if not status.get("registration_date"):
         await update_user_status(user_id, "registration_date", datetime.now().isoformat())
     
-    # Выбираем текст и клавиатуру
     is_prem = await is_premium(user_id)
-    text = START_WITH_SUB if is_prem else START_NO_SUB
     
-    await message.answer(text, reply_markup=await get_start_menu(user_id))
-
+    # Статистика
+    stats = await get_today_stats(user_id)
+    
+    # Текст меню
+    text = EXTENDED_MENU.format(count=stats["count"], saved_time=stats["saved_time"])
+    
+    # Клавиатура расширенного меню
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Иду в TikTok", callback_data="go_tiktok")],
+        [
+            InlineKeyboardButton(text="SOS", callback_data="sos") if is_prem else InlineKeyboardButton(text="SOS 🔒", callback_data="sos_locked"),
+            InlineKeyboardButton(text="Статистика", callback_data="stats"),
+        ],
+        [
+            InlineKeyboardButton(text="Подписка", callback_data="subscribe"),
+            InlineKeyboardButton(text="Тарифы", callback_data="tariffs"),
+        ],
+        [InlineKeyboardButton(text="Помощь", callback_data="help")],
+    ])
+    
+    await message.answer(text, reply_markup=keyboard)
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message) -> None:
@@ -447,7 +463,8 @@ async def callback_qp_reason(callback: types.CallbackQuery, state: FSMContext) -
     await state.update_data(reason=reason)
     await callback.message.edit_text(f"За этим стоит: {reason}.")
     await asyncio.sleep(0.5)
-    await callback.message.answer(QP_TIME, reply_markup=qp_time_keyboard())
+    # Убираем кнопки - только текст
+    await callback.message.answer(QP_TIME)
     await state.set_state(QuickPauseStates.waiting_time)
     await callback.answer()
 
@@ -567,12 +584,8 @@ async def callback_qp_finish(callback: types.CallbackQuery, state: FSMContext) -
     
     await callback.message.edit_text(f"{praise}\n\nДерево отмечает выбор.")
     
-    # Сообщение о триале (только один раз)
-    status = await get_user_status(user_id)
-    if not status.get("trial_started") and not await is_premium(user_id):
-        await update_user_status(user_id, "trial_started", True)
-        await asyncio.sleep(1)
-        await callback.message.answer(TRIAL_MESSAGE)
+
+
     
     await asyncio.sleep(1)
     await callback.message.answer(await get_menu_text(user_id), reply_markup=await get_main_menu(user_id))
@@ -694,19 +707,45 @@ async def callback_subscribe(callback: types.CallbackQuery) -> None:
         try:
             end_date = datetime.fromisoformat(status["subscription_end_date"])
             date_str = end_date.strftime("%d.%m.%Y")
+            days_left = (end_date - datetime.now()).days
+            
+            text = f"Подписка Premium\nАктивна до: {date_str} ({days_left} дн.)"
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"Продлить +30 дней", callback_data="pay_unlock")],
+                [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+            ])
         except:
-            date_str = "?"
-        text = MANAGE_SUB_ACTIVE.format(date=date_str)
+            text = "Подписка активна"
+            keyboard = manage_sub_keyboard(True)
     else:
         days = await get_usage_days(user_id)
-        if days >= FREE_DAYS_LIMIT:
-            text = PAYLOCK_LIMITED
-        else:
-            text = PAYLOAD_3DAYS.format(days=days)
-    
-    await callback.message.edit_text(text, reply_markup=manage_sub_keyboard(status["is_paid"], is_prem))
-    await callback.answer()
+        
+        # Предложение на 3 день
+        if days >= 3:
+            text = """Premium:
 
+149₽/мес
+- SOS
+- Статистика за неделю
+- Тренды"""
+        else:
+            text = """Premium:
+
+149₽/мес
+- SOS
+- Статистика за неделю
+- Тренды
+
+Бесплатно доступны все базовые функции."""
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Купить 149₽", callback_data="pay_unlock")],
+            [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+        ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
 
 @dp.callback_query(F.data == "pay_unlock")
 async def callback_pay(callback: types.CallbackQuery, state: FSMContext) -> None:
@@ -807,6 +846,90 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
 async def health_check(request: web.Request) -> web.Response:
     return web.Response(text="OK")
+
+@dp.callback_query(F.data == "sos_locked")
+async def callback_sos_locked(callback: types.CallbackQuery) -> None:
+    """SOS заблокирован для бесплатных"""
+    await callback.message.edit_text(
+        "SOS доступен в Premium.\n\n"
+        "149₽/мес — SOS, расширенная статистика, тренды.",
+        reply_markup=paywall_keyboard()
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tariffs")
+async def callback_tariffs(callback: types.CallbackQuery) -> None:
+    """Тарифы"""
+    is_prem = await is_premium(callback.from_user.id)
+    
+    status = await get_user_status(callback.from_user.id)
+    sub_text = ""
+    if status["is_paid"] and status["subscription_end_date"]:
+        try:
+            end_date = datetime.fromisoformat(status["subscription_end_date"])
+            sub_text = f"\n\nВаша подписка до: {end_date.strftime('%d.%m.%Y')}"
+        except:
+            pass
+    
+    text = f"""Тарифы UnTT
+
+Premium (149₽/мес):
+• SOS — экстренная помощь
+• Статистика за неделю/месяц
+• Тренды и средние
+• Безлимитный SOS
+
+Бесплатно:
+• Иду в TikTok
+• Статистика за сегодня{sub_text}"""
+    
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Купить Premium", callback_data="subscribe")] if not is_prem else InlineKeyboardButton(text="Назад", callback_data="back_to_menu")
+    ]))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "help")
+async def callback_help(callback: types.CallbackQuery) -> None:
+    """Помощь"""
+    text = """Справка UnTT
+
+/start — Главное меню
+/menu — Простое меню
+/cancel — Отмена
+
+Кнопки:
+• Иду в TikTok — осознанный таймер
+• SOS — экстренная помощь (Premium)
+• Статистика — твой прогресс
+• Подписка — Premium функции
+
+Поддержка: @prosto_m1f"""
+    
+    await callback.message.edit_text(text, reply_markup=back_keyboard())
+    await callback.answer()
+
+@dp.message(Command("menu"))
+async def cmd_menu(message: types.Message, state: FSMContext) -> None:
+    """Простое меню без подписки и тарифов"""
+    user_id = message.from_user.id
+    await state.clear()
+    
+    is_prem = await is_premium(user_id)
+    
+    if is_prem:
+        text = MENU_WITH_SUB.format(
+            count=(await get_today_stats(user_id))["count"],
+            saved_time=(await get_today_stats(user_id))["saved_time"]
+        )
+        await message.answer(text, reply_markup=menu_with_sub())
+    else:
+        text = MENU_NO_SUB.format(
+            count=(await get_today_stats(user_id))["count"],
+            saved_time=(await get_today_stats(user_id))["saved_time"]
+        )
+        await message.answer(text, reply_markup=menu_no_sub())
 
 
 # ==================== MAIN ====================
