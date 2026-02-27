@@ -137,11 +137,16 @@ async def get_usage_days(user_id: int) -> int:
     """Сколько дней использует бота"""
     status = await get_user_status(user_id)
     reg_date_str = status.get("registration_date")
+    
+    # Если нет даты регистрации — сохраняем сейчас
     if not reg_date_str:
+        await update_user_status(user_id, "registration_date", datetime.now().isoformat())
         return 0
+    
     try:
         reg_date = datetime.fromisoformat(reg_date_str)
-        return (datetime.now() - reg_date).days
+        days = (datetime.now() - reg_date).days
+        return days if days >= 0 else 0
     except:
         return 0
 
@@ -180,35 +185,52 @@ async def get_today_stats(user_id: int) -> dict:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         user_data = data.get(str(user_id), {})
-        saved_minutes = user_data.get("today_saved_minutes", 0)
+        
+        # Получаем сохраненное время за сегодня
+        today = datetime.now().date().isoformat()
+        last_date = user_data.get("saved_date")
+        
+        if last_date == today:
+            saved_minutes = user_data.get("today_saved_minutes", 0)
     except:
         pass
     
-    # Также считаем из статистики
+    # Считаем количество осознанных остановок
     conscious_count = 0
     if UserStats:
         try:
             stats = UserStats(user_id)
-            data = await stats.get_stats("today")
-            conscious_count = data.get("events_count", {}).get("conscious_stop", 0)
+            stats_data = await stats.get_stats("today")
+            conscious_count = stats_data.get("events_count", {}).get("conscious_stop", 0)
         except:
             pass
-    
-    # Если нет сохраненной экономии — используем старый метод
-    if saved_minutes == 0:
-        saved_minutes = conscious_count * 15
     
     return {"count": conscious_count, "saved_time": f"{saved_minutes} мин"}
 
 async def get_full_stats(user_id: int) -> dict:
     """Полная статистика (премиум)"""
+    # Получаем реальную экономию из файла
+    file_path = DATA_DIR / "user_preferences.json"
+    saved_minutes = 0
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        user_data = data.get(str(user_id), {})
+        
+        today = datetime.now().date().isoformat()
+        if user_data.get("saved_date") == today:
+            saved_minutes = user_data.get("today_saved_minutes", 0)
+    except:
+        pass
+    
+    # Данные из статистики
     if not UserStats:
         return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0}
     
     try:
         stats = UserStats(user_id)
         
-        # Данные за разные периоды
         today_data = await stats.get_stats("today")
         week_data = await stats.get_stats("week")
         month_data = await stats.get_stats("month")
@@ -216,32 +238,25 @@ async def get_full_stats(user_id: int) -> dict:
         today = today_data.get("events_count", {}).get("conscious_stop", 0)
         week = week_data.get("events_count", {}).get("conscious_stop", 0)
         month = month_data.get("events_count", {}).get("conscious_stop", 0)
+        
         days = await get_usage_days(user_id)
         
         # Средние
-        week_avg = week // 7 if week > 0 else 0
-        month_avg = month // 30 if month > 0 else 0
-        
-        # Общее время
-        total_saved = today * 15  # сегодня
-        week_saved = week * 15    # за неделю
-        month_saved = month * 15  # за месяц
+        week_avg = round(week / 7, 1) if week > 0 else 0
+        month_avg = round(month / 30, 1) if month > 0 else 0
         
         return {
             "today": today,
             "week": week,
             "month": month,
             "days": days,
-            "saved": total_saved,
-            "week_saved": week_saved,
-            "month_saved": month_saved,
+            "saved": saved_minutes,  # Реальная экономия за сегодня
             "week_avg": week_avg,
             "month_avg": month_avg
         }
     except Exception as e:
         logger.error(f"Full stats error: {e}")
-        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0}
-
+        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_avg": 0, "month_avg": 0}
 # ==================== МЕНЮ ====================
 
 async def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
@@ -314,10 +329,11 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
     user_id = message.from_user.id
     await state.clear()
     
-    # Сохраняем дату регистрации
+    # Сохраняем дату регистрации ЕСЛИ ЕЁ НЕТ
     status = await get_user_status(user_id)
     if not status.get("registration_date"):
         await update_user_status(user_id, "registration_date", datetime.now().isoformat())
+        logger.info(f"Новый пользователь {user_id}, сохранена дата регистрации")
     
     is_prem = await is_premium(user_id)
     
