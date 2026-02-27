@@ -9,6 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -209,7 +210,6 @@ async def get_today_stats(user_id: int) -> dict:
 
 async def get_full_stats(user_id: int) -> dict:
     """Полная статистика (премиум)"""
-    # Получаем реальную экономию из файла
     file_path = DATA_DIR / "user_preferences.json"
     saved_minutes = 0
     
@@ -224,9 +224,8 @@ async def get_full_stats(user_id: int) -> dict:
     except:
         pass
     
-    # Данные из статистики
     if not UserStats:
-        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0}
+        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0}
     
     try:
         stats = UserStats(user_id)
@@ -235,28 +234,35 @@ async def get_full_stats(user_id: int) -> dict:
         week_data = await stats.get_stats("week")
         month_data = await stats.get_stats("month")
         
-        today = today_data.get("events_count", {}).get("conscious_stop", 0)
-        week = week_data.get("events_count", {}).get("conscious_stop", 0)
-        month = month_data.get("events_count", {}).get("conscious_stop", 0)
+        today_count = today_data.get("events_count", {}).get("conscious_stop", 0)
+        week_count = week_data.get("events_count", {}).get("conscious_stop", 0)
+        month_count = month_data.get("events_count", {}).get("conscious_stop", 0)
         
         days = await get_usage_days(user_id)
         
         # Средние
-        week_avg = round(week / 7, 1) if week > 0 else 0
-        month_avg = round(month / 30, 1) if month > 0 else 0
+        week_avg = round(week_count / 7, 1) if week_count > 0 else 0
+        month_avg = round(month_count / 30, 1) if month_count > 0 else 0
+        
+        # Сэкономленное время за периоды (условно: каждый остановленный момент = 15 мин)
+        week_saved = week_count * 15
+        month_saved = month_count * 15
         
         return {
-            "today": today,
-            "week": week,
-            "month": month,
+            "today": today_count,
+            "week": week_count,
+            "month": month_count,
             "days": days,
-            "saved": saved_minutes,  # Реальная экономия за сегодня
+            "saved": saved_minutes,
+            "week_saved": week_saved,
+            "month_saved": month_saved,
             "week_avg": week_avg,
             "month_avg": month_avg
         }
     except Exception as e:
         logger.error(f"Full stats error: {e}")
-        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_avg": 0, "month_avg": 0}
+        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0}
+
 # ==================== МЕНЮ ====================
 
 async def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
@@ -539,8 +545,6 @@ async def process_time_input(message: types.Message, state: FSMContext):
     )
 
 
-# Замени эту функцию:
-
 @dp.callback_query(F.data == "qp_finish")
 async def callback_qp_finish(callback: types.CallbackQuery, state: FSMContext) -> None:
     """Завершение (нажал Я закончил)"""
@@ -660,50 +664,7 @@ async def callback_qp_stop(callback: types.CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
-@dp.callback_query(F.data == "qp_finish")
-async def callback_qp_finish(callback: types.CallbackQuery, state: FSMContext) -> None:
-    """Завершение (нажал Я закончил)"""
-    user_id = callback.from_user.id
-    
-    if user_id in active_timers:
-        active_timers[user_id].cancel()
-        del active_timers[user_id]
-    
-    data = await state.get_data()
-    start_time_str = data.get("start_time")
-    planned_minutes = data.get("planned_minutes", 0)
-    
-    actual_minutes = 0
-    if start_time_str:
-        try:
-            start_dt = datetime.fromisoformat(start_time_str)
-            actual_minutes = int((datetime.now() - start_dt).total_seconds() // 60)
-        except:
-            pass
-    
-    # Формируем текст
-    if planned_minutes > 0 and actual_minutes < planned_minutes:
-        praise = f"Ты вышел на {actual_minutes} мин раньше. Это победа."
-    elif actual_minutes > 0:
-        praise = f"Ты провел {actual_minutes} мин. Хорошо, что вернулся."
-    else:
-        praise = "Ты вернулся."
-    
-    if update_stats:
-        try:
-            await update_stats(user_id, "conscious_stop")
-        except:
-            pass
-    
-    await callback.message.edit_text(f"{praise}\n")
-    
 
-
-    
-    await asyncio.sleep(1)
-    await callback.message.answer(await get_menu_text(user_id), reply_markup=await get_main_menu(user_id))
-    await state.clear()
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "qp_timer_stay_action")
