@@ -22,6 +22,14 @@ from config.menu import *
 from config.texts import EXTENDED_MENU
 from config.menu import menu_no_sub, menu_with_sub, paywall_keyboard, back_keyboard
 from config.menu import stats_keyboard
+# В bot.py добавить импорт
+from datetime import timezone
+import pytz
+
+# # Функция получения московского времени
+def get_moscow_time():
+    return datetime.now(pytz.timezone('Europe/Moscow'))
+
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -77,6 +85,7 @@ active_timers = {}
 
 # ==================== ПРОВЕРКИ ДОСТУПА ====================
 
+
 async def get_user_status(user_id: int) -> dict:
     """Получить статус пользователя"""
     file_path = DATA_DIR / "user_preferences.json"
@@ -92,8 +101,10 @@ async def get_user_status(user_id: int) -> dict:
         is_paid = False
         if sub_end_str:
             try:
+                # ИСПРАВЛЕНО: используем московское время
                 sub_end = datetime.fromisoformat(sub_end_str)
-                if sub_end > datetime.now():
+                moscow_now = get_moscow_time()
+                if sub_end > moscow_now:
                     is_paid = True
             except ValueError:
                 pass
@@ -139,18 +150,25 @@ async def get_usage_days(user_id: int) -> int:
     status = await get_user_status(user_id)
     reg_date_str = status.get("registration_date")
     
-    # Если нет даты регистрации — сохраняем сейчас
     if not reg_date_str:
-        await update_user_status(user_id, "registration_date", datetime.now().isoformat())
+        await update_user_status(user_id, "registration_date", get_moscow_time().isoformat())
         return 0
     
     try:
         reg_date = datetime.fromisoformat(reg_date_str)
-        days = (datetime.now() - reg_date).days
+        # Если время на сервере в UTC, а регистрация была по Москве
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        now_moscow = datetime.now(moscow_tz)
+        
+        # Делаем reg_date aware если она naive
+        if reg_date.tzinfo is None:
+            reg_date = moscow_tz.localize(reg_date)
+        
+        days = (now_moscow - reg_date).days
         return days if days >= 0 else 0
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка подсчёта дней: {e}")
         return 0
-
 
 async def check_access(user_id: int) -> bool:
     """Полный доступ — бесплатно навсегда для базовых функций"""
@@ -160,7 +178,7 @@ async def check_access(user_id: int) -> bool:
 async def activate_subscription(user_id: int, months: int = 1) -> datetime:
     """Активировать подписку"""
     status = await get_user_status(user_id)
-    base_date = datetime.now()
+    base_date = get_moscow_time()
     
     if status["is_paid"] and status["subscription_end_date"]:
         try:
@@ -211,21 +229,29 @@ async def get_today_stats(user_id: int) -> dict:
 async def get_full_stats(user_id: int) -> dict:
     """Полная статистика (премиум)"""
     file_path = DATA_DIR / "user_preferences.json"
-    saved_minutes = 0
     
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         user_data = data.get(str(user_id), {})
         
-        today = datetime.now().date().isoformat()
+        today = get_moscow_time().date().isoformat()
+        # ИСПРАВЛЕНО: берем реальные значения, а не вычисляем
         if user_data.get("saved_date") == today:
             saved_minutes = user_data.get("today_saved_minutes", 0)
+        else:
+            saved_minutes = 0
+        total_saved = user_data.get("total_saved_minutes", 0)
     except:
-        pass
+        saved_minutes = 0
+        total_saved = 0
     
     if not UserStats:
-        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0}
+        return {
+            "today": 0, "week": 0, "month": 0, "days": 0,
+            "saved": saved_minutes, "total_saved": total_saved,
+            "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0
+        }
     
     try:
         stats = UserStats(user_id)
@@ -244,9 +270,9 @@ async def get_full_stats(user_id: int) -> dict:
         week_avg = round(week_count / 7, 1) if week_count > 0 else 0
         month_avg = round(month_count / 30, 1) if month_count > 0 else 0
         
-        # Сэкономленное время за периоды (условно: каждый остановленный момент = 15 мин)
-        week_saved = week_count * 15
-        month_saved = month_count * 15
+        # ИСПРАВЛЕНО: не умножаем на 15, используем реальное накопленное время
+        week_saved = user_data.get("week_saved_minutes", 0)
+        month_saved = user_data.get("month_saved_minutes", 0)
         
         return {
             "today": today_count,
@@ -254,6 +280,7 @@ async def get_full_stats(user_id: int) -> dict:
             "month": month_count,
             "days": days,
             "saved": saved_minutes,
+            "total_saved": total_saved,
             "week_saved": week_saved,
             "month_saved": month_saved,
             "week_avg": week_avg,
@@ -261,8 +288,11 @@ async def get_full_stats(user_id: int) -> dict:
         }
     except Exception as e:
         logger.error(f"Full stats error: {e}")
-        return {"today": 0, "week": 0, "month": 0, "days": 0, "saved": 0, "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0}
-
+        return {
+            "today": 0, "week": 0, "month": 0, "days": 0,
+            "saved": 0, "total_saved": 0,
+            "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0
+        }
 # ==================== МЕНЮ ====================
 
 async def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
@@ -608,24 +638,26 @@ async def update_user_saved_time(user_id: int, minutes: int) -> None:
     if str(user_id) not in data or not isinstance(data[str(user_id)], dict):
         data[str(user_id)] = {}
     
-    # Получаем текущее значение за сегодня
-    today = datetime.now().date().isoformat()
-    last_date = data[str(user_id)].get("saved_date")
-    current_saved = data[str(user_id)].get("today_saved_minutes", 0)
+    user_data = data[str(user_id)]
+    today = get_moscow_time().date().isoformat()
     
-    # Если новый день — сбрасываем
+    # Если новый день — сбрасываем сегодня
+    last_date = user_data.get("saved_date")
     if last_date != today:
-        current_saved = 0
+        user_data["today_saved_minutes"] = 0
     
-    # Добавляем
-    new_saved = current_saved + minutes
+    # Добавляем к сегодня
+    current_today = user_data.get("today_saved_minutes", 0)
+    user_data["today_saved_minutes"] = current_today + minutes
     
-    data[str(user_id)]["today_saved_minutes"] = new_saved
-    data[str(user_id)]["saved_date"] = today
+    # Нарастающий итог за всё время (не сбрасывается)
+    user_data["total_saved_minutes"] = user_data.get("total_saved_minutes", 0) + minutes
+    
+    user_data["saved_date"] = today
     
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
+        
 @dp.callback_query(F.data == "qp_stop")
 async def callback_qp_stop(callback: types.CallbackQuery, state: FSMContext) -> None:
     """Остановка таймера"""
@@ -786,7 +818,7 @@ async def callback_subscribe(callback: types.CallbackQuery) -> None:
         try:
             end_date = datetime.fromisoformat(status["subscription_end_date"])
             date_str = end_date.strftime("%d.%m.%Y")
-            days_left = (end_date - datetime.now()).days
+            days_left = (end_date - get_moscow_time()).days
             
             text = f"Подписка Premium\nАктивна до: {date_str} ({days_left} дн.)"
             
