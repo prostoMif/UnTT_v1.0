@@ -162,54 +162,29 @@ class UserStats:
             return False
 
     async def get_stats(self, period: str = "total") -> Dict:
-        """Получает статистику пользователя за указанный период."""
-        try:
-            # Если данные еще не загружены, загружаем их
-            if self.data is None:
-                self.data = await self._load_stats()
-
-            today = get_moscow_time().date()
-            
-            if period == "day":
-                start_date = today
-            elif period == "week":
-                start_date = today - timedelta(days=7)
-            elif period == "month":
-                start_date = today - timedelta(days=30)
+        """Получить статистику за период: today, week, month, total"""
+        data = await self._load_stats()
+        
+        now = get_moscow_time()
+        if period == "today":
+            start_date = now.date()
+        elif period == "week":
+            start_date = (now - timedelta(days=7)).date()
+        elif period == "month":
+            start_date = (now - timedelta(days=30)).date()
+        else:
+            start_date = None
+        
+        result = {"events_count": {}}
+        
+        for event_type, events in data.get("events", {}).items():
+            if start_date:
+                count = sum(1 for e in events if e.get("date", "") >= start_date.isoformat())
             else:
-                start_date = datetime.min.date()
-            
-            period_stats = {
-                "period": period,
-                "date_range": {
-                    "from": start_date.isoformat(),
-                    "to": today.isoformat()
-                },
-                "events_count": {
-                    "quick_pause": 0,
-                    "sos": 0,
-                    "daily_practice": 0,
-                    "tree_growth": 0,
-                    "tiktok_attempt": 0,
-                    "conscious_stop": 0
-                },
-                "streak_info": self.data["streaks"].copy(),
-                "total_events": 0
-            }
-            
-            for event_type, events in self.data["events"].items():
-                for event in events:
-                    event_date = datetime.fromisoformat(event["timestamp"]).date()
-                    if event_date >= start_date and event_date <= today:
-                        if event_type in period_stats["events_count"]:
-                            period_stats["events_count"][event_type] += 1
-                            period_stats["total_events"] += 1
-            
-            return period_stats
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения статистики: {e}")
-            return {"error": str(e)}
+                count = len(events)
+            result["events_count"][event_type] = count
+        
+        return result
 
     async def increment_slip(self) -> int:
         """

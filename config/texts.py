@@ -28,11 +28,13 @@ STATS_FREE = """Сегодня: {today_count} моментов  Сэкономл
 
 Среднее за неделю: {week_avg}"""
 
-STATS_PREMIUM = """Сегодня: {today_count} моментов  Сэкономлено: {saved_time}
+STATS_PREMIUM = """Сегодня: {today_count} моментов  Сэкономлено: {saved} мин
+
+За неделю: {week_count} моментов  Сэкономлено: {week_saved} мин
+За месяц: {month_count} моментов  Сэкономлено: {month_saved} мин
 
 Дней с ботом: {days_count}
-
-Недельный тренд: {week_trend}"""
+Среднее: {week_avg}/день (неделя)  {month_avg}/день (месяц)"""
 
 # --- SOS ---
 SOS_START = "Тянет открыть TikTok.\n\nЧто сейчас важнее этого?"
@@ -85,7 +87,12 @@ HELP_TEXT = """Справка по боту
 
 Поддержка: @prosto_m1f"""
 
-TARIFFS = """149₽/мес
+TARIFFS = """
+Что добавляет premium:
+расширенную статистику(7 дней)
+
+
+149₽/мес
 Без автосписания
 Отмена в любой момент"""
 
@@ -99,8 +106,8 @@ BTN_STOP = "Стоп"
 BTN_PAY = "Включить"
 
 # --- УПРАВЛЕНИЕ ПОДПИСКОЙ ---
-MANAGE_SUB_ACTIVE = "Подписка активна до: {date}\n\n[ Продлить ] [ Назад ]"
-MANAGE_SUB_INACTIVE = "Нет активной подписки.\n\n[ Купить 149₽ ]"
+MANAGE_SUB_ACTIVE = "Подписка активна до: {date}\n\n"
+MANAGE_SUB_INACTIVE = "Нет активной подписки.\n\n"
 
 
 EXTENDED_MENU = """UnTT
