@@ -317,3 +317,11 @@ async def handle_action_logger_command(message, user_id: int) -> str:
     
     else:
         return "Использование:\n/action_logger — общая статистика\n/action_logger <user_id> — статистика пользователя"
+
+async def backup_actions() -> None:
+    """Создать бэкап лога действий"""
+    import shutil
+    if ACTIONS_FILE.exists():
+        backup_file = DATA_DIR / "actions_log_backup.json"
+        shutil.copy(ACTIONS_FILE, backup_file)
+        logger.info("Бэкап действий создан")
