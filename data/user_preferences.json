@@ -1,8 +1,15 @@
 {
-    "5782224611": {
-        "subscription_end_date": "2027-02-16T20:35:20.321456"
-    },
-    "6501276743": {
-        "subscription_end_date": "2027-02-16T20:36:13.372587"
-    }
+  "6501276743": {
+    "subscription_end_date": "2027-02-16T20:36:13.372587"
+  },
+  "5782224611": {
+    "registration_date": "2026-03-01T16:32:07.427216",
+    "month_saved_minutes": 130,
+    "month_reset_date": "2026-03-01",
+    "today_saved_minutes": 130,
+    "week_saved_minutes": 130,
+    "total_saved_minutes": 130,
+    "saved_date": "2026-03-01",
+    "subscription_end_date": "2027-02-24T09:38:16.179914+03:00"
+  }
 }

@@ -26,15 +26,18 @@ QP_DONE = "Готово."
 # --- STATS ---
 STATS_FREE = """Сегодня: {today_count} моментов  Сэкономлено: {saved_time}
 
-Среднее за неделю: {week_avg}"""
 
+"""
+#  Среднее за неделю: {week_avg}
 STATS_PREMIUM = """Сегодня: {today_count} моментов  Сэкономлено: {saved} мин
+Всего сэкономлено: {total_saved} мин
 
 За неделю: {week_count} моментов  Сэкономлено: {week_saved} мин
 За месяц: {month_count} моментов  Сэкономлено: {month_saved} мин
 
 Дней с ботом: {days_count}
-Среднее: {week_avg}/день (неделя)  {month_avg}/день (месяц)"""
+"""
+# Среднее: {week_avg}/день (неделя)  {month_avg}/день (месяц)
 
 # --- SOS ---
 SOS_START = "Тянет открыть TikTok.\n\nЧто сейчас важнее этого?"
@@ -104,6 +107,7 @@ BTN_SUB = "Подписка"
 BTN_CANCEL = "Отмена"
 BTN_STOP = "Стоп"
 BTN_PAY = "Включить"
+BTN_BACK = "Назад"
 
 # --- УПРАВЛЕНИЕ ПОДПИСКОЙ ---
 MANAGE_SUB_ACTIVE = "Подписка активна до: {date}\n\n"

@@ -128,16 +128,17 @@ def stats_keyboard(is_premium: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=BTN_GO_TIKTOK, callback_data="go_tiktok")],
             [
                 InlineKeyboardButton(text=BTN_SOS, callback_data="sos"),
-                InlineKeyboardButton(text=BTN_STATS, callback_data="stats"),
+                InlineKeyboardButton(text=BTN_BACK, callback_data="back_to_menu"),  # Заменили на "Назад"
             ],
         ])
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=BTN_GO_TIKTOK, callback_data="go_tiktok")],
             [
-                InlineKeyboardButton(text=BTN_STATS, callback_data="stats"),
                 InlineKeyboardButton(text=BTN_SUB, callback_data="subscribe"),
-            ],
+                InlineKeyboardButton(text=BTN_BACK, callback_data="back_to_menu"),
+            ]
+
         ])
 
 """Клавиатуры бота"""

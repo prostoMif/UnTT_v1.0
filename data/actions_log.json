@@ -1,0 +1,125 @@
+{
+  "users": {
+    "5782224611": {
+      "actions": [
+        {
+          "timestamp": "2026-03-01T11:44:01.891978+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "tariffs",
+          "action_name": "Открыл тарифы",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:05.916359+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "back_to_menu",
+          "action_name": "Нажал 'Назад'",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:07.642054+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "go_tiktok",
+          "action_name": "Нажал 'Иду в TikTok'",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:10.434858+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "qp_reason_interest",
+          "action_name": "Причина: интерес",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:15.943320+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "qp_set_timer",
+          "action_name": "Выбрал 'Поставить таймер'",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:30.650222+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "go_tiktok",
+          "action_name": "Нажал 'Иду в TikTok'",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:34.563493+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "qp_reason_fatigue",
+          "action_name": "Причина: усталость",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:44:35.925049+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "qp_say_no",
+          "action_name": "Сказал 'Нет'",
+          "details": {
+            "reason": "усталость"
+          }
+        },
+        {
+          "timestamp": "2026-03-01T11:44:42.111869+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "stats",
+          "action_name": "Смотрел статистику",
+          "details": {}
+        },
+        {
+          "timestamp": "2026-03-01T11:57:40.214977+03:00",
+          "date": "2026-03-01",
+          "hour": 11,
+          "action": "sos",
+          "action_name": "Использовал SOS",
+          "details": {}
+        }
+      ],
+      "action_counts": {
+        "tariffs": 1,
+        "back_to_menu": 1,
+        "go_tiktok": 2,
+        "qp_reason_interest": 1,
+        "qp_set_timer": 1,
+        "qp_reason_fatigue": 1,
+        "qp_say_no": 1,
+        "stats": 1,
+        "sos": 1
+      },
+      "hourly_stats": {
+        "11": 10
+      },
+      "daily_stats": {
+        "2026-03-01": 10
+      },
+      "first_action": "2026-03-01T11:44:01.891978+03:00",
+      "last_action": "2026-03-01T11:57:40.214977+03:00",
+      "total_actions": 10
+    }
+  },
+  "global_stats": {
+    "total_actions": 10,
+    "tariffs": 1,
+    "hourly_stats": {
+      "11": 10
+    },
+    "back_to_menu": 1,
+    "go_tiktok": 2,
+    "qp_reason_interest": 1,
+    "qp_set_timer": 1,
+    "qp_reason_fatigue": 1,
+    "qp_say_no": 1,
+    "stats": 1,
+    "sos": 1
+  }
+}

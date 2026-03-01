@@ -26,6 +26,8 @@ from config.menu import stats_keyboard
 from datetime import timezone
 import pytz
 
+
+
 # # Функция получения московского времени
 def get_moscow_time():
     return datetime.now(pytz.timezone('Europe/Moscow'))
@@ -34,6 +36,19 @@ def get_moscow_time():
 # Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Логирование действий
+try:
+    from stats.action_logger import log_action, get_global_stats, get_user_stats, handle_action_logger_command
+    from stats.action_logger import format_global_report, format_user_report, ADMIN_ID as ACTION_ADMIN_ID
+except ImportError:
+    log_action = None
+    get_global_stats = None
+    get_user_stats = None
+    format_global_report = None
+    format_user_report = None
+    ACTION_ADMIN_ID = None
+    logger.warning("stats.action_logger не найден")
 
 # ==================== ИМПОРТЫ МОДУЛЕЙ ====================
 try:
@@ -101,9 +116,13 @@ async def get_user_status(user_id: int) -> dict:
         is_paid = False
         if sub_end_str:
             try:
-                # ИСПРАВЛЕНО: используем московское время
                 sub_end = datetime.fromisoformat(sub_end_str)
+                # Используем московское время
                 moscow_now = get_moscow_time()
+                if sub_end.tzinfo is None:
+                    # Если время наивное, добавляем московский часовой пояс
+                    moscow_tz = pytz.timezone('Europe/Moscow')
+                    sub_end = moscow_tz.localize(sub_end)
                 if sub_end > moscow_now:
                     is_paid = True
             except ValueError:
@@ -116,7 +135,6 @@ async def get_user_status(user_id: int) -> dict:
         }
     except Exception:
         return {"is_paid": False, "registration_date": None}
-
 
 async def update_user_status(user_id: int, key: str, value) -> None:
     """Обновить статус пользователя"""
@@ -195,6 +213,8 @@ async def activate_subscription(user_id: int, months: int = 1) -> datetime:
 
 # ==================== СТАТИСТИКА ====================
 
+# ==================== СТАТИСТИКА ====================
+
 async def get_today_stats(user_id: int) -> dict:
     """Статистика за сегодня"""
     file_path = DATA_DIR / "user_preferences.json"
@@ -205,8 +225,8 @@ async def get_today_stats(user_id: int) -> dict:
             data = json.load(f)
         user_data = data.get(str(user_id), {})
         
-        # Получаем сохраненное время за сегодня
-        today = datetime.now().date().isoformat()
+        # Используем московское время
+        today = get_moscow_time().date().isoformat()
         last_date = user_data.get("saved_date")
         
         if last_date == today:
@@ -226,9 +246,18 @@ async def get_today_stats(user_id: int) -> dict:
     
     return {"count": conscious_count, "saved_time": f"{saved_minutes} мин"}
 
+
+
+
 async def get_full_stats(user_id: int) -> dict:
     """Полная статистика (премиум)"""
     file_path = DATA_DIR / "user_preferences.json"
+    
+    # Значения по умолчанию
+    saved_minutes = 0
+    total_saved = 0
+    week_saved = 0
+    month_saved = 0
     
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -236,21 +265,21 @@ async def get_full_stats(user_id: int) -> dict:
         user_data = data.get(str(user_id), {})
         
         today = get_moscow_time().date().isoformat()
-        # ИСПРАВЛЕНО: берем реальные значения, а не вычисляем
         if user_data.get("saved_date") == today:
             saved_minutes = user_data.get("today_saved_minutes", 0)
-        else:
-            saved_minutes = 0
+        
+        # Получаем все накопленные значения
         total_saved = user_data.get("total_saved_minutes", 0)
+        week_saved = user_data.get("week_saved_minutes", 0)
+        month_saved = user_data.get("month_saved_minutes", 0)
     except:
-        saved_minutes = 0
-        total_saved = 0
+        pass
     
     if not UserStats:
         return {
             "today": 0, "week": 0, "month": 0, "days": 0,
             "saved": saved_minutes, "total_saved": total_saved,
-            "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0
+            "week_saved": week_saved, "month_saved": month_saved, "week_avg": 0, "month_avg": 0
         }
     
     try:
@@ -270,10 +299,6 @@ async def get_full_stats(user_id: int) -> dict:
         week_avg = round(week_count / 7, 1) if week_count > 0 else 0
         month_avg = round(month_count / 30, 1) if month_count > 0 else 0
         
-        # ИСПРАВЛЕНО: не умножаем на 15, используем реальное накопленное время
-        week_saved = user_data.get("week_saved_minutes", 0)
-        month_saved = user_data.get("month_saved_minutes", 0)
-        
         return {
             "today": today_count,
             "week": week_count,
@@ -291,8 +316,10 @@ async def get_full_stats(user_id: int) -> dict:
         return {
             "today": 0, "week": 0, "month": 0, "days": 0,
             "saved": 0, "total_saved": 0,
-            "week_saved": 0, "month_saved": 0, "week_avg": 0, "month_avg": 0
+            "week_saved": 0, "month_saved": 0,
+            "week_avg": 0, "month_avg": 0
         }
+        
 # ==================== МЕНЮ ====================
 
 async def get_main_menu(user_id: int) -> InlineKeyboardMarkup:
@@ -513,11 +540,32 @@ async def cmd_admin_stats(message: types.Message) -> None:
     
     await message.answer(f"Пользователей: {total}\nПодписок: {paid}")
 
+@dp.message(Command("action_logger"))
+async def cmd_action_logger(message: types.Message) -> None:
+    """Статистика действий пользователей"""
+    user_id = message.from_user.id
+    
+    if ACTION_ADMIN_ID and user_id != ACTION_ADMIN_ID:
+        await message.answer("Нет доступа.")
+        return
+    
+    if not log_action or not handle_action_logger_command:
+        await message.answer("Модуль логирования недоступен.")
+        return
+    
+    result = await handle_action_logger_command(message, user_id)
+    await message.answer(result)
+
 
 # ==================== QUICK PAUSE ====================
 
 @dp.callback_query(F.data == "go_tiktok")
 async def callback_go_tiktok(callback: types.CallbackQuery, state: FSMContext) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "go_tiktok")
+        except:
+            pass
     """Старт сценария"""
     await state.set_state(QuickPauseStates.waiting_purpose)
     
@@ -535,7 +583,12 @@ async def callback_go_tiktok(callback: types.CallbackQuery, state: FSMContext) -
 
 @dp.callback_query(F.data.startswith("qp_reason_"))
 async def callback_qp_reason(callback: types.CallbackQuery, state: FSMContext) -> None:
-    """Выбор причины"""
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, callback.data)
+        except:
+            pass
+    """Выбор причины - новый экран"""
     reasons_map = {
         "habit": "привычка", "fatigue": "усталость",
         "distraction": "отвлечение", "interest": "интерес"
@@ -543,13 +596,67 @@ async def callback_qp_reason(callback: types.CallbackQuery, state: FSMContext) -
     reason = reasons_map.get(callback.data.split("_")[-1], "причина")
     
     await state.update_data(reason=reason)
-    await callback.message.edit_text(f"За этим стоит: {reason}.")
-    await asyncio.sleep(0.5)
-    # Убираем кнопки - только текст
-    await callback.message.answer(QP_TIME)
-    await state.set_state(QuickPauseStates.waiting_time)
+    
+    # Новый экран с кнопками
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Поставить таймер", callback_data="qp_set_timer")],
+        [InlineKeyboardButton(text="Нет", callback_data="qp_say_no")]
+    ])
+    
+    await callback.message.edit_text(
+        f"За этим стоит: {reason}.\n\n"
+        "Ты опять хочешь потратить своё драгоценное время?",
+        reply_markup=keyboard
+    )
     await callback.answer()
 
+@dp.callback_query(F.data == "qp_set_timer")
+async def callback_qp_set_timer(callback: types.CallbackQuery, state: FSMContext) -> None:
+    """Выбрал поставить таймер - спрашиваем время"""
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "qp_set_timer")
+        except:
+            pass
+    await state.set_state(QuickPauseStates.waiting_time)
+    await callback.message.edit_text(QP_TIME)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "qp_say_no")
+async def callback_qp_say_no(callback: types.CallbackQuery, state: FSMContext) -> None:
+    """Сказал "Нет" - хвалим и записываем как осознанное действие"""
+    user_id = callback.from_user.id
+    data = await state.get_data()
+    reason = data.get("reason", "причина")
+    
+    # Записываем в статистику
+    if update_stats:
+        try:
+            await update_stats(user_id, "conscious_stop")
+        except:
+            pass
+    
+    # Записываем в лог действий
+    if log_action:
+        try:
+            await log_action(user_id, "qp_say_no", {"reason": data.get("reason")})
+        except:
+            pass
+    
+    
+    await state.clear()
+    
+    await callback.message.edit_text(
+        f"Ты молодец. Осознанный выбор.\n"
+        f"Причина \"{reason}\" записана."
+    )
+    await asyncio.sleep(1)
+    await callback.message.answer(
+        await get_menu_text(user_id), 
+        reply_markup=await get_main_menu(user_id)
+    )
+    await callback.answer()
 
 @dp.message(QuickPauseStates.waiting_time)
 async def process_time_input(message: types.Message, state: FSMContext):
@@ -577,12 +684,23 @@ async def process_time_input(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "qp_finish")
 async def callback_qp_finish(callback: types.CallbackQuery, state: FSMContext) -> None:
+    if log_action:
+        try:
+            await log_action(user_id, "qp_finish", {"saved": saved_minutes})
+        except:
+            pass
+
     """Завершение (нажал Я закончил)"""
     user_id = callback.from_user.id
     
     if user_id in active_timers:
         active_timers[user_id].cancel()
-        del active_timers[user_id]
+        try:
+            await active_timers[user_id]
+        except asyncio.CancelledError:
+            pass
+        finally:
+            active_timers.pop(user_id, None)
     
     data = await state.get_data()
     start_time_str = data.get("start_time")
@@ -596,20 +714,33 @@ async def callback_qp_finish(callback: types.CallbackQuery, state: FSMContext) -
         except:
             pass
     
-    # Считаем сэкономленное время: запланированное - проведенное
     saved_minutes = planned_minutes - actual_minutes
     
-    # Формируем текст
     if saved_minutes > 0:
         praise = f"Ты вышел на {saved_minutes} мин раньше. Это победа."
+        action_type = "timer_early"
     elif saved_minutes < 0:
         praise = f"Ты провел {actual_minutes} мин. На {abs(saved_minutes)} мин дольше."
+        action_type = "timer_finish"
     else:
         praise = "Ты вернулся."
+        action_type = "timer_finish"
     
     # Сохраняем сэкономленное время
     if saved_minutes > 0:
         await update_user_saved_time(user_id, saved_minutes)
+    
+    # Логируем действие
+    try:
+        from stats.action_logger import log_user_action
+        await log_user_action(user_id, action_type, {
+            "reason": data.get("reason", "unknown"),
+            "planned_minutes": planned_minutes,
+            "actual_minutes": actual_minutes,
+            "saved_minutes": saved_minutes
+        })
+    except ImportError:
+        pass
     
     if update_stats:
         try:
@@ -639,27 +770,52 @@ async def update_user_saved_time(user_id: int, minutes: int) -> None:
         data[str(user_id)] = {}
     
     user_data = data[str(user_id)]
-    today = get_moscow_time().date().isoformat()
+    moscow_now = get_moscow_time()
+    today = moscow_now.date()
+    today_str = today.isoformat()
     
-    # Если новый день — сбрасываем сегодня
+    # Проверяем, нужно ли сбрасывать неделю (понедельник)
+    last_week_reset = user_data.get("week_reset_date")
+    is_monday = today.weekday() == 0  # 0 = понедельник
+    
+    if last_week_reset != today_str and is_monday:
+        # Новый понедельник - сбрасываем неделю
+        user_data["week_saved_minutes"] = 0
+        user_data["week_reset_date"] = today_str
+    
+    # Проверяем, нужно ли сбрасывать месяц (1 число)
+    last_month_reset = user_data.get("month_reset_date")
+    is_first_of_month = today.day == 1
+    
+    if last_month_reset != today_str and is_first_of_month:
+        # Новый месяц - сбрасываем месяц
+        user_data["month_saved_minutes"] = 0
+        user_data["month_reset_date"] = today_str
+    
+    # Если это первый запуск сегодня - сбрасываем дневное
     last_date = user_data.get("saved_date")
-    if last_date != today:
+    if last_date != today_str:
         user_data["today_saved_minutes"] = 0
     
-    # Добавляем к сегодня
-    current_today = user_data.get("today_saved_minutes", 0)
-    user_data["today_saved_minutes"] = current_today + minutes
-    
-    # Нарастающий итог за всё время (не сбрасывается)
+    # Добавляем ко всему
+    user_data["today_saved_minutes"] = user_data.get("today_saved_minutes", 0) + minutes
+    user_data["week_saved_minutes"] = user_data.get("week_saved_minutes", 0) + minutes
+    user_data["month_saved_minutes"] = user_data.get("month_saved_minutes", 0) + minutes
     user_data["total_saved_minutes"] = user_data.get("total_saved_minutes", 0) + minutes
     
-    user_data["saved_date"] = today
+    user_data["saved_date"] = today_str
     
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         
 @dp.callback_query(F.data == "qp_stop")
 async def callback_qp_stop(callback: types.CallbackQuery, state: FSMContext) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "qp_stop")
+        except:
+            pass
+        
     """Остановка таймера"""
     user_id = callback.from_user.id
     data = await state.get_data()
@@ -687,10 +843,15 @@ async def callback_qp_stop(callback: types.CallbackQuery, state: FSMContext) -> 
         except:
             pass
     
+
     if user_id in active_timers:
         active_timers[user_id].cancel()
-        del active_timers[user_id]
-    
+        try:
+            await active_timers[user_id]
+        except asyncio.CancelledError:
+            pass
+        finally:
+            active_timers.pop(user_id, None)    
     await state.clear()
     await callback.message.edit_text(QP_STOPPED_EARLY.format(saved=saved))
     await callback.answer()
@@ -701,12 +862,30 @@ async def callback_qp_stop(callback: types.CallbackQuery, state: FSMContext) -> 
 
 @dp.callback_query(F.data == "qp_timer_stay_action")
 async def callback_qp_timer_stay(callback: types.CallbackQuery) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "qp_timer_stay")
+        except:
+            pass
+        
     """Остался в TikTok"""
     user_id = callback.from_user.id
     
     if user_id in active_timers:
         active_timers[user_id].cancel()
-        del active_timers[user_id]
+        try:
+            await active_timers[user_id]
+        except asyncio.CancelledError:
+            pass
+        finally:
+            active_timers.pop(user_id, None)
+    
+    # Логируем действие
+    try:
+        from stats.action_logger import log_user_action
+        await log_user_action(user_id, "stayed", {})
+    except ImportError:
+        pass
     
     await callback.message.edit_text("Мы отметили этот момент.")
     await asyncio.sleep(1)
@@ -718,6 +897,11 @@ async def callback_qp_timer_stay(callback: types.CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "stats")
 async def callback_stats(callback: types.CallbackQuery) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "stats")
+        except:
+            pass
     """Статистика"""
     user_id = callback.from_user.id
     is_prem = await is_premium(user_id)
@@ -727,6 +911,7 @@ async def callback_stats(callback: types.CallbackQuery) -> None:
         text = STATS_PREMIUM.format(
             today_count=stats["today"],
             saved=stats["saved"],
+            total_saved=stats["total_saved"],
             week_count=stats["week"],
             week_saved=stats["week_saved"],
             month_count=stats["month"],
@@ -757,7 +942,12 @@ async def callback_sos(callback: types.CallbackQuery, state: FSMContext) -> None
         await callback.message.edit_text(SOS_NEED_PREMIUM, reply_markup=paywall_keyboard())
         await callback.answer()
         return
-    
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "sos")
+        except:
+            pass
+            
     await state.set_state(SosStates.waiting_priority)
     await callback.message.edit_text(SOS_START, reply_markup=sos_priority_keyboard())
     await callback.answer()
@@ -809,6 +999,11 @@ async def callback_sos_action(callback: types.CallbackQuery, state: FSMContext) 
 @dp.callback_query(F.data == "subscribe")
 @dp.callback_query(F.data == "manage_subscription")
 async def callback_subscribe(callback: types.CallbackQuery) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "subscribe")
+        except:
+            pass
     """Управление подпиской"""
     user_id = callback.from_user.id
     status = await get_user_status(user_id)
@@ -933,6 +1128,11 @@ async def callback_check_payment(callback: types.CallbackQuery, state: FSMContex
 
 @dp.callback_query(F.data == "back_to_menu")
 async def callback_back(callback: types.CallbackQuery) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "back_to_menu")
+        except:
+            pass
     """Назад в меню"""
     user_id = callback.from_user.id
     await callback.message.answer(await get_menu_text(user_id), reply_markup=await get_main_menu(user_id))
@@ -971,6 +1171,11 @@ async def callback_sos_locked(callback: types.CallbackQuery) -> None:
 
 @dp.callback_query(F.data == "tariffs")
 async def callback_tariffs(callback: types.CallbackQuery) -> None:
+    if log_action:
+        try:
+            await log_action(callback.from_user.id, "tariffs")
+        except:
+            pass
     """Тарифы"""
     is_prem = await is_premium(callback.from_user.id)
     
@@ -996,8 +1201,8 @@ Premium (149₽/мес):
 • Статистика за сегодня{sub_text}"""
     
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Купить Premium", callback_data="subscribe")] if not is_prem else InlineKeyboardButton(text="Назад", callback_data="back_to_menu")
-    ]))
+    [InlineKeyboardButton(text="Купить Premium", callback_data="subscribe")] if not is_prem else [InlineKeyboardButton(text="Назад", callback_data="back_to_menu")]
+]))
     await callback.answer()
 
 
@@ -1046,37 +1251,46 @@ async def cmd_menu(message: types.Message, state: FSMContext) -> None:
 # ==================== MAIN ====================
 
 async def main():
-    port = int(os.getenv("PORT", 10000))
     webhook_url = os.getenv("WEBHOOK_URL")
-    webhook_path = os.getenv("WEBHOOK_PATH", "/webhook")
-    webhook_secret = os.getenv("WEBHOOK_SECRET")
     
-    if not webhook_url:
-        logger.critical("WEBHOOK_URL не задан!")
-        return
+    if webhook_url:
     
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(url=webhook_url, secret_token=webhook_secret)
-    
-    app = web.Application()
-    app.router.add_post(webhook_path, handle_webhook)
-    app.router.add_get('/health', health_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host='0.0.0.0', port=port)
-    await site.start()
-    
-    logger.info(f"Бот запущен на порту {port}")
-    
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except:
-        pass
-    finally:
-        await runner.cleanup()
-        await bot.session.close()
+        port = int(os.getenv("PORT", 10000))
+        webhook_url = os.getenv("WEBHOOK_URL")
+        webhook_path = os.getenv("WEBHOOK_PATH", "/webhook")
+        webhook_secret = os.getenv("WEBHOOK_SECRET")
+        
+        if not webhook_url:
+            logger.critical("WEBHOOK_URL не задан!")
+            return
+        
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.set_webhook(url=webhook_url, secret_token=webhook_secret)
+        
+        app = web.Application()
+        app.router.add_post(webhook_path, handle_webhook)
+        app.router.add_get('/health', health_check)
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host='0.0.0.0', port=port)
+        await site.start()
+        
+        logger.info(f"Бот запущен на порту {port}")
+        
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except:
+            pass
+        finally:
+            await runner.cleanup()
+            await bot.session.close()
+    else:
+        # Локальный запуск - используем polling
+        logger.info("Запуск в режиме polling (локально)")
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
